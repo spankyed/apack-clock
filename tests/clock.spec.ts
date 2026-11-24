@@ -468,7 +468,7 @@ describe('closing and capability view', () => {
     const waiting = time.sleep(100, { signal: controller.signal })
     time.close()
     await expect(waiting).rejects.toSatisfy((error: unknown) =>
-      error instanceof ClockClosedError && error.name === 'ClockClosedError' && error.message === 'The clock is closed',
+      error instanceof ClockClosedError && error.name === 'ClockClosedError' && error.message === 'The clock is closed; nothing new may be asked of it',
     )
     expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
     await expect(time.sleep(10)).rejects.toBeInstanceOf(ClockClosedError)
