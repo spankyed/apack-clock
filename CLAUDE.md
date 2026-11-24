@@ -13,7 +13,8 @@ holds; this is what to know before changing it.
   throwing callbacks, stale wakeups, fractional jitter, and mid-flight close). `tests/support/world.ts` is the
   time, timers and turns a spec hands a clock, which move only when told to.
 - `docs/deferred/` is what is left out on purpose and why.
-- `scripts/` is what CI and a release run: the package smoke, and the check that no workflow publishes to npm.
+- `scripts/` is what CI and a release run: the package smoke (runtime + TS 5.7 browser-consumer typecheck), package
+  lint (`publint` + `attw`), and the check that no workflow publishes to npm.
 
 ## Rules
 
@@ -37,9 +38,12 @@ holds; this is what to know before changing it.
 
 ```bash
 npm run typecheck
+npm run typecheck:floor
 npm test
+npm run test:browser
 npm run mutants
 npm run build
+npm run package:lint
 npm run package:smoke
 npm run workflows:check
 ```

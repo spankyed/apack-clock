@@ -461,9 +461,26 @@ describe('closing and disposal', () => {
   it('separates consumer Clock capability from ManagedClock lifecycle', () => {
     const managed: ManagedClock = clock(world().sources)
     const consumer: Clock = managed
+    // A minimal consumer Clock fake requires no Disposable or lifecycle methods.
+    const fake: Clock = {
+      now: () => 0,
+      after: () => () => {},
+      sleep: async () => {},
+    }
+    expect(fake.now()).toBe(0)
     expect(typeof consumer.now).toBe('function')
     expect(typeof consumer.after).toBe('function')
     expect(typeof consumer.sleep).toBe('function')
+    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
+    void consumer.close
+    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
+    void consumer.pause
+    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
+    void consumer.resume
+    // @ts-expect-error Consumer Clock does not expose host inspection controls.
+    void consumer.pending
+    // @ts-expect-error Consumer Clock does not extend Disposable.
+    void consumer[Symbol.dispose]
     managed.close()
   })
 
@@ -510,7 +527,7 @@ describe('on the real time and timers', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('takes its turns from setImmediate where there is one, and cancels pending immediates on close()', async () => {
+  it.skipIf(typeof setImmediate !== 'function')('takes its turns from setImmediate where there is one, and cancels pending immediates on close()', async () => {
     const realSet = setImmediate
     const realClear = clearImmediate
     let asked = 0
@@ -528,6 +545,23 @@ describe('on the real time and timers', () => {
     // Closing again does not double-clear.
     time.close()
     expect(cleared).toBe(1)
+  })
+
+  it.skipIf(typeof setImmediate === 'function')('runs unstubbed in a real browser window via MessageChannel, performance.now(), setTimeout, and AbortSignal', async () => {
+    expect(typeof setImmediate).toBe('undefined')
+    using time = clock()
+    const ran: string[] = []
+    let microtasks = 0
+    time.after(0, () => { ran.push('zero-1'); void Promise.resolve().then(() => { microtasks++ }) })
+    time.after(0, () => { ran.push(`zero-2 after ${microtasks}`) })
+    time.after(15, () => { ran.push('delayed') })
+    const controller = new AbortController()
+    const aborted = time.sleep(5_000, { signal: controller.signal })
+    controller.abort(new Error('browser-abort'))
+    await expect(aborted).rejects.toThrow('browser-abort')
+    await time.sleep(35)
+    expect(ran).toEqual(['zero-1', 'zero-2 after 1', 'delayed'])
+    expect(time.pending()).toBe(0)
   })
 
   it('takes its turns from a message channel where there is no setImmediate, reuses it, and closes it on close()', async () => {
