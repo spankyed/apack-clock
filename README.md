@@ -1,7 +1,12 @@
 # @apackdev/clock
 
-A clock a program is handed in place of `setTimeout` and `Date.now()`: something to run after this long, and the
-time it is. The surface is intentionally small; additions require a real caller that cannot be served without them.
+**Time as a dependency, not a global.**
+
+JavaScript treats `setTimeout` and `Date.now()` as globals, which makes asynchronous code hard to coordinate, shut
+down cleanly, and test deterministically. `@apackdev/clock` gives the host one controllable clock (`ClockController`)
+and hands subsystems a three-method `Clock` (`now`, `after`, `sleep`)—with zero dependencies and the same shape in
+production and deterministic tests. The surface is intentionally small; additions require a real caller that cannot be
+served without them.
 
 ```ts
 import { ClockController, type Clock } from '@apackdev/clock'
