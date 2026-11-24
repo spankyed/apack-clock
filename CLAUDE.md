@@ -1,22 +1,50 @@
 # apack-clock
 
-A clock a program is handed in place of `setTimeout` and `Date.now()`. `README.md` defines the vocabulary, source
-contracts, and guarantees; this is what to know before changing it.
+A clock a program is handed in place of `setTimeout` and `Date.now()`. `README.md` holds the public contract; this
+file holds internal design details, vocabulary, and contributor rules.
 
 ## Layout
 
 - `src/index.ts` is the whole package: `ClockController` (`clock`, `waiting()`, `suspend()`, `resume()`, `close()`),
-  the heap of what waits ordered by when each is due, the one armed timer for what is due first, and the real sources
-  it reads unless given others.
-- `tests/clock.spec.ts` holds each guarantee in the README as a case. `tests/proof.spec.ts` runs bounded exhaustive
-  fixpoint BFS directly over `ClockController` for safety and liveness. `tests/model.spec.ts` runs 400 seeded property
-  traces. `tests/contracts.spec.ts` and `tests/support/checked-sources.ts` enforce the assume–guarantee source
-  contracts. `tests/worker.spec.ts` and `tests/support/clock-worker.ts` verify dedicated Web Workers across Chromium,
-  Firefox, and WebKit. `tests/support/world.ts` supplies controlled sources wrapped in `checkedSources`.
+  an indexed binary min-heap of what waits (`O(log n)` insert, pop, and remove-on-cancel with no dead entries left
+  behind), the one armed timer for what is due first, and the real sources it reads unless given others.
+- `tests/clock.spec.ts` holds each guarantee in the README as a case. `tests/proof.spec.ts` explores every reachable
+  state of `ClockController` within finite bounds (up to 3 waits for core scheduling/suspend/resume/wake/cancel/close,
+  up to 2 waits for multi-hop and re-entrant callbacks) for both safety and liveness. `tests/model.spec.ts` runs 400
+  seeded random traces. `tests/contracts.spec.ts` and `tests/support/checked-sources.ts` enforce all four source
+  contracts on every call. `tests/worker.spec.ts` and `tests/support/clock-worker.ts` verify dedicated Web Workers
+  across Chromium, Firefox, and WebKit. `tests/support/world.ts` supplies controlled sources wrapped in `checkedSources`.
 - `docs/deferred/` is what is left out on purpose and why.
 - `scripts/` is what CI and a release run: build determinism and size/cost checks (`package-check.mjs`), consumer
   runtime + TS 5.7 ES2023 typecheck smoke (`package-smoke.mjs`), `publint` + `attw` (`package-lint.mjs`), and the
   check that no workflow publishes to npm (`workflows-check.mjs`).
+
+## Internals to preserve
+
+- **Indexed binary min-heap (`O(log n)` remove-on-cancel):** each entry tracks its current `index` so cancelling
+  removes it directly without leaving tombstones or walking the queue.
+- **No mid-callback timer churn (`running` guard):** while a due callback executes, `arm()` defers until `finally` so
+  multiple `after()` / cancel edits inside one callback settle into at most one underlying timer call.
+- **Stale wakeup guard (`armed.token`):** every armed underlying timer carries a fresh object token so a cancelled
+  timer firing late cannot disarm or leak a newer timer.
+- **IEEE-754 `resume()` heap safety:** after shifting every waiting entry's `due` by the suspended `span`, bottom-up
+  Floyd heapify restores heap order in `O(n)` in case floating-point addition collapsed two distinct `due` values to
+  equal and flipped their `seq` tie-break order.
+
+## Glossary (one voice)
+
+Use these eight words consistently across `src/`, comments, specs, and docs:
+
+| Word | Meaning |
+|---|---|
+| `due` | The moment on `monotonic` when an entry may run |
+| `waits` | An entry still in the queue, not yet run or called off (`waiting()` counts them) |
+| `armed` | The single underlying timer currently set for what is due first |
+| `turn` | One turn of the event loop, in which at most one due entry runs |
+| `hop` | One underlying timer leg of at most `MAX_TIMER_MS` ms for a wait longer than a timer accepts |
+| `suspended` | Counting stopped (`suspend()` until `resume()`): nothing runs, and elapsed monotonic time is not counted |
+| `closed` | Permanently shut down (`close()`): everything waiting is called off, pending sleeps reject, and later asks fail |
+| `said` | The latest finite time of day `now()` has returned, never going back |
 
 ## Rules
 
@@ -32,8 +60,6 @@ contracts, and guarantees; this is what to know before changing it.
   `erasableSyntaxOnly: true` and Node `>=24.12.0`.
 - **Every mutant is caught.** A line whose change no spec notices is a line nothing holds: add the case, or where the
   change is mathematically equivalent, explain why on that line.
-- **One voice.** Use the eight-word glossary in `README.md` (`due`, `waits`, `armed`, `turn`, `hop`, `suspended`,
-  `closed`, `said`) consistently across code, comments, specs, and docs.
 
 ## Commands
 
