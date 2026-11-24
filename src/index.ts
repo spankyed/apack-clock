@@ -1,87 +1,87 @@
 // A clock a program is handed in place of `setTimeout` and `Date.now()`: something to run after this long, and the
-// time it is. One indexed min-heap of what waits, in the order it is due, and at most one underlying timer for the
-// first of it.
+// time it is. One heap of what waits, ordered by when each is due, and at most one armed timer for what is due first.
 //
-// How long is counted on a clock that only goes forward (`monotonic`), so setting the time of day moves nothing that
-// waits. The time it is comes from the time of day (`wall`), and is never earlier than it was last said to be.
+// How long is counted on `monotonic`, so setting the time of day moves nothing that waits. The time it is comes from
+// `wall`, and is never earlier than what `now` last said.
 //
 // What it reads and what wakes it are handed in (`Sources`). A program hands in nothing and gets the real ones; a
 // spec hands in its own and chooses when each thing happens.
 
 /** What a clock reads and is woken by. Each is the real one unless given. */
 export interface Sources {
-  /** Milliseconds on a clock that only goes forward, from any start: `performance.now()`. */
+  /** Milliseconds on a clock that only goes forward, from any start: `performance.now()`. Must stay finite and never decrease. */
   monotonic(): number
-  /** The time of day, in milliseconds since 1970: `Date.now()`. It may go back, and a clock does not follow it there. */
+  /** The time of day, in milliseconds since 1970: `Date.now()`. May go back or read non-finite; `now` never follows it back. */
   wall(): number
   /**
-   * Calls `run` once, about `ms` from now, unless what it returns is called first: `setTimeout`. It may be late by
-   * any amount, or a little early. `ms` is never more than `LONGEST`.
+   * Calls `run` once, about `ms` from now, unless what it returns is called first: `setTimeout`. Must not invoke `run`
+   * inline, and must return a cancel function. May wake early, late, or stale. `ms` is always finite in `(0, LONGEST]`.
    */
   timer(ms: number, run: () => void): () => void
-  /** Calls `run` on a later turn of the event loop, soon, in the order asked. */
+  /** Calls `run` on a later turn of the event loop, in the order asked. Must not invoke `run` inline. */
   turn(run: () => void): void
 }
 
 export interface SleepOptions {
-  /** Aborts the sleep, cancelling its timer and rejecting with `signal.reason`. */
+  /** Aborts the sleep, calling off what waits and rejecting with `signal.reason`. */
   readonly signal?: AbortSignal
 }
 
-/** Thrown by `after` or rejected from `sleep` when the clock is closed. */
+/** Thrown by `after`, or rejected from `sleep`, once the clock is closed. */
 export class ClockClosedError extends Error {
   constructor() {
-    super('The clock is closed')
+    super('The clock is closed; nothing new may be asked of it')
     this.name = 'ClockClosedError'
   }
 }
 
-/** Consumer-facing clock capability: read time and wait, without authority to pause or close the host's clock. */
+/** What a consumer is handed: read what is said and wait, with no authority to pause or close the clock. */
 export interface Clock {
   /**
-   * The time it is, in milliseconds since 1970, and never earlier than this clock last said: where the time of day
-   * is set back, it says what it said before until the time of day has passed that.
+   * The time it is, in milliseconds since 1970, and never earlier than what this clock last said: where the time of
+   * day is set back or reads non-finite, it keeps what it last said until `wall` passes that.
    */
   now(): number
   /**
-   * Runs `run` once, when `ms` have passed on the clock that only goes forward, unless what it returns is called
-   * first. Never before then, and never as it is called: on a turn of its own, alone. Of two due at the same
-   * moment, the one set first runs first. Less than nothing is nothing. Throws a `RangeError` for what is not a
-   * finite length of time, and `ClockClosedError` once the clock is closed.
+   * Runs `run` once when `ms` have passed on `monotonic`, unless what it returns is called first. Never before it is
+   * due, and never inline: on a turn of its own, alone. Of two due at the same moment, the one asked first runs first.
+   * Less than nothing is nothing. Throws `RangeError` for a non-finite `ms`, and `ClockClosedError` once closed.
    */
   after(ms: number, run: () => void): () => void
   /**
-   * Resolves when `ms` have passed, as `after` runs. Rejects with `signal.reason` if `options.signal` aborts, with
-   * `ClockClosedError` if the clock is closed, or with `RangeError` for a non-finite `ms`.
+   * Resolves when `ms` have passed, as `after` runs. Rejects with `RangeError` for a non-finite `ms`, with
+   * `signal.reason` if `options.signal` aborts, or with `ClockClosedError` if the clock is closed.
    */
   sleep(ms: number, options?: SleepOptions): Promise<void>
 }
 
-/** Host-owned clock handle, adding lifecycle and inspection controls over `Clock`. */
+/** What whoever owns the clock holds: a `Clock`, plus `view`, `pending`, `pause`, `resume`, and `close`. */
 export interface ManagedClock extends Clock {
-  /** Returns a frozen consumer `Clock` view exposing only `now`, `after`, and `sleep`. */
+  /** Returns a frozen `Clock` exposing only `now`, `after`, and `sleep`. */
   view(): Clock
-  /** How many things are currently waiting to run. */
+  /** How many entries currently wait to run. */
   pending(): number
   /**
-   * Stops counting: nothing runs, and what passes until `resume` is not counted against anything that waits. For
-   * whoever is told the machine is about to sleep, where the clock that only goes forward goes on through it.
+   * Pauses counting: nothing runs, no timer stays armed, and what passes until `resume` is not counted against what
+   * waits. For whoever is told the machine is about to sleep, where `monotonic` goes on through it.
    */
   pause(): void
-  /** Counts again from here. */
+  /** Resumes counting from here, shifting what waits by the paused span. */
   resume(): void
-  /** Calls off everything waiting, clears the underlying timer, rejects pending sleeps, and runs nothing after. */
+  /** Closes the clock: calls off everything that waits, disarms any timer, rejects pending sleeps, and refuses later asks. */
   close(): void
 }
 
-/** The longest a timer is set for, in milliseconds: one set for longer runs at once. What waits longer is woken for in hops. */
+/** The longest a timer is set for, in milliseconds: a longer wait wakes in hops of at most `LONGEST`. */
 export const LONGEST = 0x7fffffff
 
 interface Entry {
+  /** Moment on `monotonic` when this entry may run. */
   due: number
+  /** Tie-breaker among entries due at the same moment: lower was asked first. */
   readonly seq: number
   readonly run: () => void
-  /** Current slot in the binary min-heap, or -1 once popped, called off, or closed. */
+  /** Slot in the heap of what waits, or -1 once popped, called off, or closed. */
   index: number
 }
 
@@ -89,7 +89,7 @@ const before = (a: Entry, b: Entry): boolean =>
   // Stryker disable next-line EqualityOperator: every entry has a unique seq, so < and <= are equivalent.
   a.due < b.due || (a.due === b.due && a.seq < b.seq)
 
-/** A later turn of the event loop, where there is `setImmediate` and where there is not. */
+/** Turns of the event loop, using `setImmediate` where present and a reused `MessageChannel` otherwise. */
 const makeTurns = (): { readonly turn: Sources['turn']; close(): void } => {
   if (typeof setImmediate === 'function') {
     const handles = new Set<ReturnType<typeof setImmediate>>()
@@ -114,7 +114,7 @@ const makeTurns = (): { readonly turn: Sources['turn']; close(): void } => {
     turn: (run) => {
       if (!channel) {
         channel = new MessageChannel()
-        // Node's types leave a port's `onmessage` out, and it is what a window and Node both have.
+        // Node's types omit `onmessage` on MessagePort, and both Node and browsers provide it.
         port1 = channel.port1 as unknown as { onmessage: (() => void) | null; unref?: () => void }
         port1.onmessage = () => { asked.shift()!() }
         port1.unref?.()
@@ -134,7 +134,7 @@ const makeTurns = (): { readonly turn: Sources['turn']; close(): void } => {
   }
 }
 
-/** Makes a clock: on the real time and timers, or on what it is given in place of each. */
+/** Makes a clock on the real sources, or on what is given in place of any of them. */
 export function clock(given: Partial<Sources> = {}): ManagedClock {
   const ownedTurns = given.turn ? undefined : makeTurns()
   const from: Sources = {
@@ -144,20 +144,21 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
     turn: given.turn ?? ownedTurns!.turn,
   }
 
-  /** Indexed binary min-heap of what waits, earliest due first and FIFO for equal due times. */
+  /** Indexed min-heap of what waits: earliest due first, then lowest `seq`. */
   const heap: Entry[] = []
   let nextSeq = 0
-  /** Currently armed underlying timer, tagged by identity so a stale wakeup cannot clobber a newer one. */
+  /** The one armed timer, tagged by identity so a stale wakeup cannot disarm a newer one. */
   let armed: { readonly token: object; readonly cancel: () => void } | undefined
-  /** Whether a turn has been asked for, to run what is due. */
+  /** Whether a turn has already been asked for to run what is due. */
   let turning = false
-  /** Whether a callback is currently running: defers re-arming until `finally` to avoid mid-callback churn. */
+  /** Whether a due callback is running now: delays re-arming until `finally` so edits inside it arm once. */
   let running = false
-  /** When counting stopped, while it is stopped. */
+  /** Reading of `monotonic` when counting paused, while paused. */
   let paused: number | undefined
   let closed = false
+  /** Latest finite reading of `wall` that `now` has said. */
   let said = Number.NEGATIVE_INFINITY
-  /** Pending `sleep()` waiters settled with `ClockClosedError` if the clock closes first. */
+  /** Pending sleeps rejected with `ClockClosedError` if the clock closes first. */
   const sleepers = new Set<() => void>()
 
   const place = (index: number, entry: Entry): void => {
@@ -215,7 +216,7 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
     cancel()
   }
 
-  /** Sees to the first of what waits: a turn for it if it is due, and the timer if it is not. */
+  /** Sees to what is due first: asks for a turn if it is due now, or arms one hop if it is not. */
   const arm = (): void => {
     if (running || closed || turning || paused !== undefined) return
     disarm()
@@ -236,19 +237,19 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
     armed = { token, cancel }
   }
 
-  /** Runs the first of what waits if it is due, and only it: each thing run has a turn to itself. */
+  /** Runs what is due first if its moment has arrived, and only it: each entry runs on a turn of its own. */
   const next = (): void => {
     if (closed || paused !== undefined) return
     const first = heap[0]
     if (!first || first.due > from.monotonic()) { arm(); return }
     removeAt(0)
-    // What it throws is its own, and whoever called this is handed it: what waits is seen to either way.
+    // Whatever it throws is handed on, and what still waits is seen to either way.
     running = true
     try { first.run() } finally { running = false; arm() }
   }
 
   const assertFinite = (ms: number): void => {
-    if (!Number.isFinite(ms)) throw new RangeError(`A clock is asked for a finite length of time, and was given ${String(ms)}`)
+    if (!Number.isFinite(ms)) throw new RangeError(`A clock expects a finite wait in milliseconds, and was given ${String(ms)}`)
   }
 
   const now: Clock['now'] = () => {
@@ -327,7 +328,7 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
       const span = from.monotonic() - paused
       paused = undefined
       for (const entry of heap) entry.due += span
-      // IEEE-754 addition can collapse distinct deadlines to the same float, flipping their `seq` tie-break order.
+      // Adding `span` can round two distinct `due` times to the same float, reversing their `seq` tie-break order.
       for (let index = (heap.length >> 1) - 1; index >= 0; index--) siftDown(index)
       arm()
     },
