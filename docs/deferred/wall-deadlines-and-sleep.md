@@ -19,8 +19,8 @@ kept state needs one adds surface without a caller.
   against the same clamped base fires immediately instead of stalling for the size of the backward jump.
 - **Wake notification (`poke()` / `resume()`):** on macOS and Linux, `setTimeout` pauses while a laptop sleeps, so
   a wall-clock deadline that passed during sleep would fire hours late unless the host pokes the clock on wake.
-  Whoever receives OS power events (Electron's `powerMonitor` `suspend` / `resume`) calls `pause()` on suspend and
+  Whoever receives OS power events (Electron's `powerMonitor` `suspend` / `resume`) calls `suspend()` on suspend and
   `resume()` on wake — `resume()` both excludes the suspended span from monotonic `after()` entries (solving
   Windows sleep too) and drains any wall-clock `until()` entries whose `wallTime <= now()`.
-- **Same queue shape:** a second indexed min-heap for wall-clock entries sharing the same `LONGEST` (`0x7fffffff`)
+- **Same queue shape:** a second indexed min-heap for wall-clock entries sharing the same `MAX_TIMER_MS` (`0x7fffffff`)
   hop cap, one-timer-per-turn drain, and remove-on-cancel hygiene.

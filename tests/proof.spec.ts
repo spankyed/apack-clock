@@ -1,22 +1,22 @@
-// Bounded exhaustive state-space exploration directly over the real `clock()` implementation.
+// Bounded exhaustive state-space exploration directly over the real `ClockController` implementation.
 //
 // Unlike the seeded property suite (`model.spec.ts`), which samples long random trajectories, this BFS explores
-// EVERY reachable interleaving of scheduling, cancellation, pause/resume, early/on-time/late timer wakeups, stale
+// EVERY reachable interleaving of scheduling, cancellation, suspend/resume, early/on-time/late timer wakeups, stale
 // cancelled wakeups, turns, close, multi-hop delays, and re-entrant callbacks up to a finite bound.
 //
 // At every reachable state it verifies:
-//   - Safety: never early, never twice, never called off, never while paused or closed, FIFO on ties, <= 1 timer,
-//     exact pending(), and ClockClosedError on after() after close.
+//   - Safety: never early, never twice, never called off, never while suspended or closed, FIFO on ties, <= 1 timer,
+//     exact waiting(), and ClockClosedError on after() after close.
 //   - Liveness: every reachable non-closed state drains to quiescence in finite steps with every waiting callback
 //     executed in exact (due, seq) order.
 import { describe, expect, it } from 'vitest'
-import { clock, ClockClosedError, LONGEST } from '../src/index.ts'
+import { ClockController, ClockClosedError, MAX_TIMER_MS } from '../src/index.ts'
 import { world } from './support/world.ts'
 
 type Action =
-  | { readonly kind: 'ask'; readonly ms: number; readonly effect?: 'none' | 'ask0' | 'cancelNext' | 'pause' | 'close' | 'throw' }
+  | { readonly kind: 'ask'; readonly ms: number; readonly effect?: 'none' | 'ask0' | 'cancelNext' | 'suspend' | 'close' | 'throw' }
   | { readonly kind: 'cancel'; readonly slot: number }
-  | { readonly kind: 'pause' }
+  | { readonly kind: 'suspend' }
   | { readonly kind: 'resume'; readonly span: number }
   | { readonly kind: 'wake'; readonly late: number }
   | { readonly kind: 'stale' }
@@ -34,7 +34,7 @@ interface Thing {
 interface ReplayState {
   readonly key: string
   readonly closed: boolean
-  readonly paused: boolean
+  readonly suspended: boolean
   readonly asked: number
   readonly waitingSlots: readonly number[]
   readonly hasTimer: boolean
@@ -44,7 +44,8 @@ interface ReplayState {
 
 const replay = (actions: readonly Action[]): ReplayState => {
   const at = world()
-  const time = clock(at.sources)
+  const controller = new ClockController(at.sources)
+  const { clock } = controller
   const things: Thing[] = []
   let stopped: number | undefined
   let closed = false
@@ -65,9 +66,9 @@ const replay = (actions: readonly Action[]): ReplayState => {
       off: () => {},
     }
     things.push(thing)
-    thing.off = time.after(ms, () => {
+    thing.off = clock.after(ms, () => {
       holds(!closed, `${thing.id} ran after close`)
-      holds(stopped === undefined, `${thing.id} ran while paused`)
+      holds(stopped === undefined, `${thing.id} ran while suspended`)
       holds(thing.state === 'waits', `${thing.id} ran when ${thing.state}`)
       holds(at.mono >= thing.due, `${thing.id} ran early at ${at.mono} < ${thing.due}`)
       holds(first() === thing, `${thing.id} ran ahead of ${first()?.id}`)
@@ -78,11 +79,11 @@ const replay = (actions: readonly Action[]): ReplayState => {
       } else if (effect === 'cancelNext') {
         const next = first()
         if (next) { next.off(); next.state = 'off' }
-      } else if (effect === 'pause') {
-        time.pause()
+      } else if (effect === 'suspend') {
+        controller.suspend()
         stopped = at.mono
       } else if (effect === 'close') {
-        time.close()
+        controller.close()
         closed = true
         stopped = undefined
         for (const w of waits()) w.state = 'off'
@@ -94,14 +95,14 @@ const replay = (actions: readonly Action[]): ReplayState => {
 
   const checkInvariants = (): void => {
     const live = waits()
-    holds(time.pending() === live.length, `pending() ${time.pending()} !== ${live.length}`)
+    holds(controller.waiting() === live.length, `waiting() ${controller.waiting()} !== ${live.length}`)
     holds(at.timers.length <= 1, `timers.length = ${at.timers.length}`)
     const next = first()
     if (closed) {
       holds(live.length === 0, 'closed clock has live items')
       holds(at.timers.length === 0, 'closed clock has an active timer')
     } else if (stopped !== undefined) {
-      holds(at.timers.length === 0, 'paused clock has an active timer')
+      holds(at.timers.length === 0, 'suspended clock has an active timer')
     } else if (at.turns === 0) {
       holds(!next || next.due > at.mono, `due item ${next?.id} left waiting with no turn`)
       holds(at.timers.length === (next ? 1 : 0), `timer count ${at.timers.length} disagrees with waits ${live.length}`)
@@ -126,15 +127,15 @@ const replay = (actions: readonly Action[]): ReplayState => {
     } else if (action.kind === 'cancel') {
       const target = things[action.slot]!
       step(() => { target.off(); if (target.state === 'waits') target.state = 'off' })
-    } else if (action.kind === 'pause') {
-      step(() => { time.pause(); stopped = at.mono })
+    } else if (action.kind === 'suspend') {
+      step(() => { controller.suspend(); stopped = at.mono })
     } else if (action.kind === 'resume') {
       step(() => {
         at.mono += action.span
         const span = at.mono - stopped!
         for (const w of waits()) w.due += span
         stopped = undefined
-        time.resume()
+        controller.resume()
       })
     } else if (action.kind === 'wake') {
       step(() => { at.wake(action.late) })
@@ -144,13 +145,13 @@ const replay = (actions: readonly Action[]): ReplayState => {
       step(() => { at.turn() })
     } else {
       step(() => {
-        time.close()
+        controller.close()
         closed = true
         stopped = undefined
         for (const w of waits()) w.state = 'off'
       })
       let threwClosed = false
-      try { time.after(0, () => {}) } catch (error) { threwClosed = error instanceof ClockClosedError }
+      try { clock.after(0, () => {}) } catch (error) { threwClosed = error instanceof ClockClosedError }
       holds(threwClosed, 'after() on closed clock must throw ClockClosedError')
       step(() => { at.settle() })
     }
@@ -162,7 +163,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
   const rel = waiting.map((thing) => `${Math.round((thing.due - base) * 100) / 100}:${thing.effect}`).join(',')
   const snapshot: ReplayState = {
     key: [
-      closed ? 'C' : stopped !== undefined ? 'P' : 'R',
+      closed ? 'C' : stopped !== undefined ? 'S' : 'R',
       `n=${things.length}`,
       `w=[${rel}]`,
       `t=${at.timers[0]?.ms ?? -1}`,
@@ -170,7 +171,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
       `s=${at.cancelled.length > 0 ? 1 : 0}`,
     ].join('|'),
     closed,
-    paused: stopped !== undefined,
+    suspended: stopped !== undefined,
     asked: things.length,
     waitingSlots: waiting.map((thing) => thing.id),
     hasTimer: at.timers.length === 1,
@@ -187,7 +188,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
           const span = at.mono - stopped!
           for (const w of waits()) w.due += span
           stopped = undefined
-          time.resume()
+          controller.resume()
         })
       }
       while (at.turns > 0 && !closed && stopped === undefined) {
@@ -203,7 +204,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
       step(() => { at.wake(0) })
     }
     holds(waits().length === 0, `liveness failed: ${waits().length} waiting items never ran`)
-    holds(time.pending() === 0, `liveness failed: pending()=${time.pending()} after drain`)
+    holds(controller.waiting() === 0, `liveness failed: waiting()=${controller.waiting()} after drain`)
   }
 
   return snapshot
@@ -233,7 +234,7 @@ const explore = (
 }
 
 describe('exhaustive bounded state-space proof', () => {
-  it('reaches fixpoint verifying safety and liveness across every reachable state (up to 3 items, pause/resume, early/late/stale wakeups, cancel, close)', () => {
+  it('reaches fixpoint verifying safety and liveness across every reachable state (up to 3 items, suspend/resume, early/late/stale wakeups, cancel, close)', () => {
     const result = explore((state) => {
       if (state.closed) return []
       const actions: Action[] = []
@@ -241,8 +242,8 @@ describe('exhaustive bounded state-space proof', () => {
         actions.push({ kind: 'ask', ms: 0 }, { kind: 'ask', ms: 1 }, { kind: 'ask', ms: 2 })
       }
       for (const slot of state.waitingSlots) actions.push({ kind: 'cancel', slot })
-      if (!state.paused) {
-        actions.push({ kind: 'pause' })
+      if (!state.suspended) {
+        actions.push({ kind: 'suspend' })
       } else {
         actions.push({ kind: 'resume', span: 0 }, { kind: 'resume', span: 1 })
       }
@@ -264,16 +265,16 @@ describe('exhaustive bounded state-space proof', () => {
       const actions: Action[] = []
       if (state.asked < 2) {
         actions.push(
-          { kind: 'ask', ms: LONGEST + 1, effect: 'none' },
+          { kind: 'ask', ms: MAX_TIMER_MS + 1, effect: 'none' },
           { kind: 'ask', ms: 0, effect: 'ask0' },
           { kind: 'ask', ms: 1, effect: 'cancelNext' },
-          { kind: 'ask', ms: 1, effect: 'pause' },
+          { kind: 'ask', ms: 1, effect: 'suspend' },
           { kind: 'ask', ms: 1, effect: 'close' },
           { kind: 'ask', ms: 1, effect: 'throw' },
         )
       }
       for (const slot of state.waitingSlots) actions.push({ kind: 'cancel', slot })
-      if (!state.paused) actions.push({ kind: 'pause' })
+      if (!state.suspended) actions.push({ kind: 'suspend' })
       else actions.push({ kind: 'resume', span: 1 })
       if (state.hasTimer) actions.push({ kind: 'wake', late: -0.5 }, { kind: 'wake', late: 0 })
       if (state.hasTurn) actions.push({ kind: 'turn' })

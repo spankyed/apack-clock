@@ -1,6 +1,6 @@
-import { LONGEST, type Sources } from '../../src/index.ts'
+import { MAX_TIMER_MS, type ClockSources } from '../../src/index.ts'
 
-/** Thrown when either a `Sources` implementation or a clock breaks one of the four source contracts. */
+/** Thrown when either a `ClockSources` implementation or a clock breaks one of the four source contracts. */
 export class SourceContractError extends Error {
   constructor(message: string) {
     super(message)
@@ -9,7 +9,7 @@ export class SourceContractError extends Error {
 }
 
 /**
- * Assume–guarantee monitor around a `Sources` object.
+ * Assume–guarantee monitor around a `ClockSources` object.
  *
  * Assumes of the handed-in sources:
  * - `monotonic()` returns a finite number that never decreases.
@@ -18,10 +18,10 @@ export class SourceContractError extends Error {
  * - `wall()` may jump, regress, or be non-finite (no monotonicity assumed).
  *
  * Guarantees of the clock calling into sources:
- * - `timer(ms, run)` is called only with finite `ms` in `(0, LONGEST]`.
+ * - `timer(ms, run)` is called only with finite `ms` in `(0, MAX_TIMER_MS]`.
  * - At most one uncancelled, unfired underlying timer is active at any time.
  */
-export function checkedSources(sources: Sources): Sources {
+export function checkedSources(sources: ClockSources): ClockSources {
   let lastMonotonic = Number.NEGATIVE_INFINITY
   let activeTimers = 0
 
@@ -39,8 +39,8 @@ export function checkedSources(sources: Sources): Sources {
     },
     wall: () => sources.wall(),
     timer: (ms, run) => {
-      if (!Number.isFinite(ms) || ms <= 0 || ms > LONGEST) {
-        throw new SourceContractError(`timer(ms, run) requires finite ms in (0, ${LONGEST}], got ${String(ms)}`)
+      if (!Number.isFinite(ms) || ms <= 0 || ms > MAX_TIMER_MS) {
+        throw new SourceContractError(`timer(ms, run) requires finite ms in (0, ${MAX_TIMER_MS}], got ${String(ms)}`)
       }
       if (activeTimers !== 0) {
         throw new SourceContractError(`timer(ms, run) was armed while ${activeTimers} timer(s) were already active`)
