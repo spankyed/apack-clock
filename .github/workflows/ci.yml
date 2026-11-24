@@ -39,10 +39,10 @@ jobs:
       # The packed package as published code: its manifest and files (publint), and each entry's types (attw).
       - run: npm run package:lint
 
-  # The clock's specs in a real browser window: Chromium, through vitest's browser mode and Playwright, proving real
-  # browser MessageChannel, performance.now(), setTimeout, and AbortSignal behavior without Node stubs.
+  # The clock's specs in real browser engines and dedicated Web Workers: Chromium, Firefox, and WebKit via vitest's
+  # browser mode and Playwright, proving real MessageChannel, performance.now(), setTimeout, and AbortSignal behavior.
   browser:
-    name: browser (chromium)
+    name: browser (chromium, firefox, webkit)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -51,18 +51,18 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # Chromium is kept between runs for the Playwright that installs it; what it needs of the system is installed each time.
+      # Browsers are kept between runs for the Playwright that installs them; system deps are installed each time.
       - id: playwright
         run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         id: browsers
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+          key: playwright-all-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
       - if: steps.browsers.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox webkit
       - if: steps.browsers.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+        run: npx playwright install-deps chromium firefox webkit
       - run: npm run test:browser
 
   # Every mutant of the source, run against the specs: one that survives fails.
