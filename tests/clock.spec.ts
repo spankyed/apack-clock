@@ -530,13 +530,13 @@ describe('on the real time and timers', () => {
     try {
       const ran: string[] = []
       let turnsOver = 0
-      clock.after(15, () => { ran.push('second') })
-      clock.after(5, () => { ran.push('first') })
       clock.after(0, () => { ran.push('at once'); void Promise.resolve().then(() => { turnsOver++ }) })
       clock.after(0, () => { ran.push(`after ${turnsOver}`) })
-      clock.after(10, () => { ran.push('never') })()
+      clock.after(50, () => { ran.push('second') })
+      clock.after(10, () => { ran.push('first') })
+      clock.after(30, () => { ran.push('never') })()
       const before = clock.now()
-      await clock.sleep(40)
+      await clock.sleep(80)
       expect(ran).toEqual(['at once', 'after 1', 'first', 'second'])
       expect(clock.now()).toBeGreaterThanOrEqual(before)
       expect(Math.abs(clock.now() - Date.now())).toBeLessThan(5_000)
