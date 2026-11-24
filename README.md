@@ -1,22 +1,24 @@
 # @apackdev/clock
 
 A clock a program is handed in place of `setTimeout` and `Date.now()`: something to run after this long, and the
-time it is.
+time it is. The surface is intentionally small; additions require a real caller that cannot be served without them.
 
 ```ts
-import { ClockController } from '@apackdev/clock'
+import { ClockController, type Clock } from '@apackdev/clock'
 
-const controller = new ClockController()
-const { clock } = controller
-try {
+async function run(clock: Clock) {
   const ran: string[] = []
   clock.after(20, () => { ran.push('second') })
   clock.after(10, () => { ran.push('first') })
   // What `after` returns calls it off.
   clock.after(15, () => { ran.push('never') })()
   await clock.sleep(40)
-
   console.log(ran.join(', '))
+}
+
+const controller = new ClockController()
+try {
+  await run(controller.clock)
 } finally {
   controller.close()
 }
@@ -26,97 +28,118 @@ try {
 first, second
 ```
 
-## What a clock is
+## Wiring the host
 
-Like `AbortController` and `AbortSignal`, the host handle (`ClockController`) is separate from the consumer handle
-(`Clock`): whoever owns the clock constructs `new ClockController()` and hands `controller.clock` (a frozen
-`{ now, after, sleep }` object) to consumers. Passing `controller` where a `Clock` is expected is a compile error, so
-host lifecycle controls cannot leak by mistake.
+The host constructs one `ClockController`, hands `controller.clock` to subsystems, wires OS sleep notifications if it
+receives them, and closes the controller on shutdown. Every controller method is bound, so it can be passed directly
+as a listener:
+
+```ts
+const controller = new ClockController()
+powerMonitor.on('suspend', controller.suspend)
+powerMonitor.on('resume', controller.resume)
+// Pass `controller.clock` to subsystems; call `controller.close()` on shutdown.
+```
+
+## In a test
+
+`Clock` has the same shape that `@apackdev/link` accepts (`after`) and that
+[`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) provides on a schedule (`now`, `after`, `sleep`).
+Any code written against `Clock` runs unchanged under deterministic schedules:
+
+```ts
+// In production: await run(controller.clock)
+// In a test:
+await run(schedule.clock)
+```
+
+## API
+
+Like `AbortController` and `AbortSignal`, `ClockController` is not a `Clock` — passing `controller` where a `Clock` is
+expected is a compile error, so host controls cannot leak to consumers by mistake.
+
+### What code is handed (`Clock`)
 
 | | |
 |---|---|
-| `clock.after(ms, run)` | Runs `run` once when `ms` have passed, unless what it returns is called first; throws `RangeError` for non-finite `ms` and `ClockClosedError` once closed |
-| `clock.sleep(ms, { signal })` | Resolves when `ms` have passed; rejects with `RangeError` for non-finite `ms`, `signal.reason` on abort, or `ClockClosedError` when closed |
-| `clock.now()` | The time of day, in milliseconds since 1970, never earlier than what this clock last said (note: `now()` is wall time, not monotonic time, so `now() + ms` is **not** when `after(ms)` fires) |
-| `controller.clock` | *(ClockController)* Frozen `Clock` exposing only `now`, `after`, and `sleep` |
-| `controller.waiting()` | *(ClockController)* How many entries currently wait to run |
-| `controller.suspend()` / `resume()` | *(ClockController)* Suspends and resumes counting: what passes while suspended is counted against nothing that waits |
-| `controller.close()` | *(ClockController)* Calls off everything that waits, disarms any timer, rejects pending sleeps with `ClockClosedError`, and refuses later asks |
+| `clock.after(ms, run)` | Runs `run` once when `ms` have passed, unless what it returns is called first |
+| `clock.sleep(ms, options?)` | Resolves when `ms` have passed; accepts `{ signal?: AbortSignal }` |
+| `clock.now()` | The time of day in milliseconds since 1970, never earlier than what this clock last said. Note: `now()` is wall time (`Date.now()`), not monotonic time, so `now() + ms` is **not** when `after(ms)` fires |
 
-Match closed-clock errors by name (`error instanceof Error && error.name === 'ClockClosedError'`) rather than
-`instanceof ClockClosedError` so duplicate package copies or cross-realm boundaries still match cleanly.
+### What the host holds (`ClockController`)
 
-`new ClockController()` reads the real sources. `new ClockController({ monotonic, wall, timer, turn })` takes any of
-the four from whoever constructs it (`ClockSources`), which is how its own specs choose when each thing happens.
-
-`Clock` has the shape apack-link takes a clock in (`after`), and that the schedule of
-[`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) offers a scenario (`now`, `after`, `sleep`), so
-code written against one runs on the other: a program is handed `controller.clock`, and a spec the schedule's.
-
-## Glossary
-
-| Word | Meaning |
+| | |
 |---|---|
-| `due` | The moment on `monotonic` when an entry may run |
-| `waits` | An entry still in the queue, not yet run or called off (`waiting()` counts them) |
-| `armed` | The single underlying timer currently set for what is due first |
-| `turn` | One turn of the event loop, in which at most one due entry runs |
-| `hop` | One underlying timer leg of at most `MAX_TIMER_MS` ms for a wait longer than a timer accepts |
-| `suspended` | Counting stopped (`suspend()` until `resume()`): nothing runs, and elapsed monotonic time is not counted |
-| `closed` | Permanently shut down (`close()`): everything waiting is called off, pending sleeps reject, and later asks fail |
-| `said` | The latest finite time of day `now()` has returned, never going back |
+| `new ClockController(sources?)` | Creates a controller on the real sources, or on custom `ClockSources` |
+| `controller.clock` | Frozen `Clock` exposing only `now`, `after`, and `sleep` |
+| `controller.waiting()` | Count of entries currently waiting to run |
+| `controller.suspend()` / `resume()` | Suspends and resumes counting; time elapsed while suspended is not counted against what waits |
+| `controller.close()` | Calls off everything waiting, clears any timer, rejects pending sleeps, and refuses later asks |
 
-## Source contracts
+### Errors
 
-Soundness holds under four stated assumptions on `ClockSources`, enforced in tests by `checkedSources`:
+- **Non-finite `ms` (`NaN`, `±Infinity`):** `after` throws `RangeError`; `sleep` rejects with `RangeError`.
+- **Aborted `signal`:** `sleep` cancels its wait and rejects with `signal.reason`.
+- **Closed clock:** `after` throws and `sleep` rejects with `ClockClosedError`. Match it by name
+  (`error instanceof Error && error.name === 'ClockClosedError'`) rather than `instanceof`, so cross-realm or duplicate
+  package loads still match.
 
-- **`monotonic()`** returns a finite number in milliseconds that never decreases.
-- **`wall()`** returns milliseconds since 1970; it may jump, go back, or read non-finite (`now()` never follows it back).
-- **`timer(ms, run)`** never calls `run` inline and returns a cancel function; it may wake early, late, or stale. In return, the clock only ever asks it for a finite `ms` in `(0, MAX_TIMER_MS]`, and keeps at most one timer armed.
-- **`turn(run)`** never calls `run` inline and delivers turns in the order asked.
+## Source contracts (`ClockSources`)
+
+`new ClockController(sources)` accepts any subset of four sources (`monotonic`, `wall`, `timer`, `turn`). Soundness
+relies on these four contracts:
+
+- **`monotonic()`** returns a finite number in milliseconds that never decreases (default: `performance.now()`).
+- **`wall()`** returns milliseconds since 1970; it may jump, go back, or read non-finite (`now()` never follows it back; default: `Date.now()`).
+- **`timer(ms, run)`** never invokes `run` inline and returns a cancel function; it may wake early, late, or stale. In return, the clock only passes finite `ms` in `(0, MAX_TIMER_MS]` (`0x7fffffff`) and keeps at most one timer set (default: `setTimeout` / `clearTimeout`).
+- **`turn(run)`** never invokes `run` inline and runs callbacks in the order asked (default: `setImmediate`, or a reused `MessageChannel` in browsers and Web Workers).
 
 ## What holds
 
-- **Nothing runs early.** How long is counted on `monotonic`, and what is due is checked again on every wake: an early
+- **Nothing runs early.** Duration is measured on `monotonic`, and what is due is checked again on every wake; an early
   timer runs nothing, and sub-millisecond remainders round up so OS jitter never spins at `0 ms`.
-- **Setting the time of day moves nothing that waits.** `after` does not read `wall`.
-- **What `now()` says never goes back.** Where `wall` goes back or reads non-finite, `now()` keeps what it last said
-  until `wall` passes that.
-- **One heap and at most one armed timer**, for what is due first, and none once nothing waits, while suspended, or
-  once closed. Calling off is $O(\log n)$ with no dead entries left behind.
-- **No mid-callback timer churn, and stale wakeups are ignored.** What a callback asks for or calls off is armed once
-  it returns; a cancelled underlying timer firing late cannot disarm a newer one.
-- **Any finite wait.** A timer set for more than 2 147 483 647 ms (`MAX_TIMER_MS`, about 24.8 days) runs at once; a
-  longer wait wakes in hops and runs when it is due. Non-finite waits (`NaN`, `±Infinity`) throw `RangeError`.
-- **Each entry runs on a turn of its own**, and nothing runs inline: `after(0, run)` runs on a later turn. Of two due
+- **Setting the time of day moves nothing that waits.** `after` never reads `wall`.
+- **What `now()` says never goes back.** If `wall` moves backward or reads non-finite, `now()` keeps its last reading
+  until `wall` passes it.
+- **At most one underlying timer**, for what is due first, and none once nothing waits, while suspended, or once closed.
+- **Any finite wait works.** Waits longer than `MAX_TIMER_MS` (2 147 483 647 ms, about 24.8 days) wake in steps and
+  run when due. Negative finite waits are treated as `0`.
+- **Each callback gets a turn of its own**, and nothing runs inline: `after(0, run)` runs on a later turn. Of two due
   at the same moment, the one asked first runs first.
-- **Woken late, everything due runs**, in order, a turn each, and one timer is armed for what is not due yet.
-- **What a callback throws is its own.** Whatever woke the clock is handed it, and what still waits is seen to either way.
-- **No dependencies**, and it runs in Node, Chromium, Firefox, WebKit, and Web Workers from one source.
+- **Woken late, everything due runs**, in order, one turn each, and what is not yet due keeps waiting.
+- **What a callback throws is its own.** The error propagates to whatever woke the clock, and remaining waits still run.
+- **Zero runtime dependencies.** Runs in Node, Chromium, Firefox, WebKit, and dedicated Web Workers from one source.
 
-Each of these is verified at four levels:
-1. Unit specs ([tests/clock.spec.ts](tests/clock.spec.ts)) and dedicated Web Worker specs ([tests/worker.spec.ts](tests/worker.spec.ts)) across Node (Linux, macOS, Windows) and Chromium, Firefox, and WebKit.
-2. Bounded exhaustive fixpoint BFS ([tests/proof.spec.ts](tests/proof.spec.ts)) directly over `ClockController`, proving both safety and liveness across every reachable interleaving.
-3. 400-seed randomized property runs ([tests/model.spec.ts](tests/model.spec.ts)) under the assume–guarantee source monitor ([tests/contracts.spec.ts](tests/contracts.spec.ts)).
-4. 100% mutation testing (`npm run mutants`), where a single surviving mutant fails CI.
+## How it is checked
+
+- **Cross-runtime specs:** unit specs ([tests/clock.spec.ts](tests/clock.spec.ts)) and dedicated Web Worker specs
+  ([tests/worker.spec.ts](tests/worker.spec.ts)) run in Node on Linux, macOS, and Windows, and in Chromium, Firefox,
+  and WebKit.
+- **Bounded exhaustive exploration:** [tests/proof.spec.ts](tests/proof.spec.ts) drives `ClockController` directly
+  through every reachable state within finite bounds — up to 3 waits across scheduling, cancelling, suspend/resume,
+  early/late/stale wakeups, and close, and up to 2 waits across multi-step waits and re-entrant callbacks — checking
+  safety at every state and verifying that every non-closed state drains to completion.
+- **Randomized traces with checked sources:** [tests/model.spec.ts](tests/model.spec.ts) runs 400 seeded traces while
+  [tests/contracts.spec.ts](tests/contracts.spec.ts) checks all four source contracts on every call.
+- **Every mutant is caught:** `npm run mutants` mutates `src/index.ts` and fails CI if a single mutant survives.
 
 ## What it does not do
 
-- **It does not know the machine slept.** A late timer does not say whether the machine was asleep or the program
-  was only not run for a while, and nothing here guesses. Where `monotonic` stops while the machine sleeps, sleep is
-  not counted. Where it goes on, what waited through a sleep runs on waking, as it does with `setTimeout`. Whoever is
-  told the machine is about to sleep and has woken, as Electron's `powerMonitor` is, says so with `suspend()` and
-  `resume()`, and then it is not counted anywhere.
-- **It runs nothing at a time of day.** `after` is for how long. Something due at a moment on the calendar, which
-  has to survive the program stopping and to follow the time of day being set, is another thing, and is deferred
-  ([wall-deadlines-and-sleep.md](docs/deferred/wall-deadlines-and-sleep.md)).
-- **A hidden window is woken seldom.** A browser runs a hidden window's timers as rarely as once a minute, so what
-  is due there runs late, and never early.
+- **It does not know the machine slept.** A late timer does not distinguish sleep from throttling, so nothing here
+  guesses. Where `monotonic` pauses during sleep, sleep is not counted; where `monotonic` ticks through sleep, waits
+  fire on wake just as `setTimeout` does, unless the host calls `suspend()` and `resume()`.
+- **It runs nothing at a time of day.** `after` is for durations. Calendar deadlines that survive restarts and follow
+  wall-clock changes are deferred ([wall-deadlines-and-sleep.md](docs/deferred/wall-deadlines-and-sleep.md)).
+- **Hidden browser tabs wake seldom.** Browsers throttle hidden-tab timers (often to once per minute), so waits there
+  may run late, and never early.
 
-## Installing
+## Requirements & installing
 
-It is not on npm. Each `master` commit whose CI passed has a prerelease, `pkg-<commit>`, holding the package as
-`npm pack` writes it, and a consumer installs it by that asset's URL:
+- **Runtime:** Node `>= 24.12.0`, or any browser / Web Worker with `performance.now`, `MessageChannel`, and `AbortSignal`.
+- **Types:** TypeScript `>= 5.7` (tested against `ES2023` consumers with `skipLibCheck: false` and no `ESNext.Disposable`).
+
+This package is not published to npm. Each `master` commit whose CI passed gets a GitHub prerelease, `pkg-<commit>`,
+holding the packed tarball and its `SHA256SUMS`:
 
 ```json
 "@apackdev/clock": "https://github.com/spankyed/apack-clock/releases/download/pkg-<commit>/apackdev-clock-0.1.0.tgz"
