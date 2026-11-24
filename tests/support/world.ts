@@ -8,7 +8,9 @@ export interface World {
   /** The time of day. */
   wall: number
   /** The timers set and not yet run or called off, with when each is set to run and for how long it was set. */
-  readonly timers: ReadonlyArray<{ readonly at: number; readonly ms: number }>
+  readonly timers: ReadonlyArray<{ readonly at: number; readonly ms: number; readonly run: () => void }>
+  /** Callbacks of timers that were already cancelled, so specs can simulate a spurious stale wakeup. */
+  readonly cancelled: ReadonlyArray<() => void>
   /** How long every timer ever set was set for. */
   readonly set: readonly number[]
   /** How many turns are asked for and not yet run. */
@@ -23,12 +25,14 @@ export interface World {
 
 export function world(): World {
   const timers: Array<{ at: number; ms: number; run: () => void }> = []
+  const cancelled: Array<() => void> = []
   const turns: Array<() => void> = []
   const set: number[] = []
   const it: World = {
     mono: 0,
     wall: 1_000_000,
     timers,
+    cancelled,
     set,
     get turns() { return turns.length },
     sources: {
@@ -38,7 +42,13 @@ export function world(): World {
         const timer = { at: it.mono + ms, ms, run }
         timers.push(timer)
         set.push(ms)
-        return () => { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1) }
+        return () => {
+          const index = timers.indexOf(timer)
+          if (index >= 0) {
+            timers.splice(index, 1)
+            cancelled.push(run)
+          }
+        }
       },
       turn: (run) => { turns.push(run) },
     },

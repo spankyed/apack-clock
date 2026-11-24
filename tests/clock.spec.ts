@@ -13,10 +13,13 @@ const made = () => {
 describe('what runs, and when', () => {
   it('runs what was asked for once that long has passed, and not before', () => {
     const { at, ran, time, note } = made()
+    expect(time.pending()).toBe(0)
     time.after(100, note('a'))
+    expect(time.pending()).toBe(1)
     expect(at.timers).toEqual([{ at: 100, ms: 100, run: expect.any(Function) }])
     at.wake()
     expect(ran).toEqual(['a'])
+    expect(time.pending()).toBe(0)
     expect(at.timers).toEqual([])
   })
 
@@ -25,14 +28,16 @@ describe('what runs, and when', () => {
     time.after(0, note('a'))
     expect(ran).toEqual([])
     expect(at.timers).toEqual([])
+    expect(time.pending()).toBe(1)
     at.settle()
     expect(ran).toEqual(['a'])
+    expect(time.pending()).toBe(0)
   })
 
-  it('takes less than nothing as nothing', () => {
+  it('takes negative finite lengths as nothing', () => {
     const { at, ran, time, note } = made()
     time.after(-50, note('a'))
-    time.after(Number.NEGATIVE_INFINITY, note('b'))
+    time.after(-0.5, note('b'))
     at.settle()
     expect(ran).toEqual(['a', 'b'])
   })
@@ -42,14 +47,14 @@ describe('what runs, and when', () => {
     time.after(30, note('c'))
     time.after(10, note('a'))
     time.after(20, note('b'))
+    time.after(25, note('b2'))
+    time.after(5, note('a0'))
+    time.after(15, note('a2'))
     // One timer, for the first of them.
-    expect(at.timers.map((timer) => timer.at)).toEqual([10])
-    at.wake()
-    expect(ran).toEqual(['a'])
-    expect(at.timers.map((timer) => timer.at)).toEqual([20])
-    at.wake()
-    at.wake()
-    expect(ran).toEqual(['a', 'b', 'c'])
+    expect(at.timers.map((timer) => timer.at)).toEqual([5])
+    while (at.timers.length) at.wake()
+    expect(ran).toEqual(['a0', 'a', 'a2', 'b', 'b2', 'c'])
+    expect(time.pending()).toBe(0)
   })
 
   it('runs the one set first, of two due at the same moment', () => {
@@ -58,9 +63,10 @@ describe('what runs, and when', () => {
     time.after(10, note('second'))
     at.mono = 4
     time.after(6, note('third'))
+    time.after(6, note('fourth'))
     at.wake()
     at.settle()
-    expect(ran).toEqual(['first', 'second', 'third'])
+    expect(ran).toEqual(['first', 'second', 'third', 'fourth'])
   })
 
   it('gives each thing it runs a turn to itself, however many are due', () => {
@@ -76,15 +82,33 @@ describe('what runs, and when', () => {
     expect(at.turn()).toBe(false)
   })
 
-  it('runs nothing early when its timer runs before it was set to', () => {
+  it('runs nothing early when its timer runs before it was set to, rounding sub-ms remainders up', () => {
     const { at, ran, time, note } = made()
     time.after(100, note('a'))
     at.wake(-1)
     expect(ran).toEqual([])
-    // Set again for what is left.
+    expect(at.timers.map((timer) => timer.ms)).toEqual([1])
+    at.wake(-0.8)
+    expect(ran).toEqual([])
+    // 0.8ms remaining rounds up to 1ms rather than passing a sub-ms delay that truncates to 0.
     expect(at.timers.map((timer) => timer.ms)).toEqual([1])
     at.wake()
     expect(ran).toEqual(['a'])
+  })
+
+  it('ignores a spurious wakeup from a timer that was already called off', () => {
+    const { at, ran, time, note } = made()
+    const offA = time.after(100, note('a'))
+    time.after(200, note('b'))
+    offA()
+    expect(at.cancelled).toHaveLength(1)
+    // Even if an old timer fires late at t=200, it must not clobber b's timer or run prematurely.
+    at.mono = 150
+    at.cancelled[0]!()
+    expect(ran).toEqual([])
+    expect(at.timers.map((timer) => timer.at)).toEqual([200])
+    at.wake()
+    expect(ran).toEqual(['b'])
   })
 
   it('runs what is due however late it is woken, and sets its timer for what is not', () => {
@@ -115,12 +139,13 @@ describe('what runs, and when', () => {
     expect(at.mono).toBe(long)
   })
 
-  it('throws for what is not a length of time, and sets nothing', () => {
+  it('throws for what is not a finite length of time, and sets nothing', () => {
     const { at, time } = made()
-    for (const not of [Number.NaN, Number.POSITIVE_INFINITY, '5' as unknown as number, undefined as unknown as number]) {
+    for (const not of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '5' as unknown as number, undefined as unknown as number]) {
       expect(() => time.after(not, () => {})).toThrow(RangeError)
     }
     expect(() => time.after(Number.NaN, () => {})).toThrow(/given NaN/)
+    expect(time.pending()).toBe(0)
     expect(at.timers).toEqual([])
     expect(at.turns).toBe(0)
   })
@@ -142,19 +167,28 @@ describe('calling off', () => {
     const off = time.after(10, note('a'))
     time.after(20, note('b'))
     off()
+    expect(time.pending()).toBe(1)
     expect(at.timers.map((timer) => timer.at)).toEqual([20])
     at.wake()
     expect(ran).toEqual(['b'])
   })
 
-  it('leaves the timer as it is when what is called off was not first', () => {
+  it('leaves the timer as it is when what is called off was not first, and preserves heap order', () => {
     const { at, ran, time, note } = made()
-    time.after(10, note('a'))
-    const off = time.after(20, note('b'))
-    off()
+    // Build a 7-node heap where removing an interior node triggers siftUp (swap with a smaller leaf on another branch).
+    time.after(10, note('10'))
+    time.after(50, note('50'))
+    time.after(20, note('20'))
+    const off60 = time.after(60, note('60'))
+    const off70 = time.after(70, note('70'))
+    time.after(25, note('25'))
+    time.after(22, note('22'))
+    // Removing 60 replaces it with 22 (which must siftUp past parent 50); removing 70 replaces it with 25 (siftUp past 50).
+    off60()
+    off70()
     expect(at.set).toEqual([10])
-    at.wake()
-    expect(ran).toEqual(['a'])
+    while (at.timers.length) at.wake()
+    expect(ran).toEqual(['10', '20', '22', '25', '50'])
     expect(at.timers).toEqual([])
   })
 
@@ -162,6 +196,7 @@ describe('calling off', () => {
     const { at, time, note } = made()
     const off = time.after(10, note('a'))
     off()
+    expect(time.pending()).toBe(0)
     expect(at.timers).toEqual([])
   })
 
@@ -189,22 +224,66 @@ describe('calling off', () => {
 })
 
 describe('what is asked for as something runs', () => {
-  it('takes what is asked for from inside what it runs, in its place among what waits', () => {
+  it('takes what is asked for from inside what it runs without mid-callback timer churn', () => {
     const { at, ran, time, note } = made()
     time.after(10, () => {
       ran.push('a')
-      time.after(0, note('at once'))
+      const offTemp = time.after(25, note('temp'))
+      time.after(15, note('earlier'))
+      offTemp()
       time.after(50, note('later'))
+      // Still inside callback: no new underlying timer has been churned yet.
+      expect(at.set).toEqual([10])
+      time.after(0, note('at once'))
     })
     time.after(30, note('b'))
     at.wake()
     expect(ran).toEqual(['a'])
+    // Only the initial 10ms timer was set; `at once` is handled via turn without arming a timer mid-callback.
+    expect(at.set).toEqual([10])
     at.settle()
     expect(ran).toEqual(['a', 'at once'])
-    at.wake()
-    at.wake()
-    expect(ran).toEqual(['a', 'at once', 'b', 'later'])
+    while (at.timers.length) at.wake()
+    expect(ran).toEqual(['a', 'at once', 'earlier', 'b', 'later'])
     expect(at.timers).toEqual([])
+  })
+
+  it('drops a later due timer cancelled from inside an earlier callback', () => {
+    const { at, ran, time, note } = made()
+    let cancelB = () => {}
+    time.after(10, () => { ran.push('a'); cancelB() })
+    cancelB = time.after(10, note('b'))
+    time.after(10, note('c'))
+    at.wake()
+    at.settle()
+    expect(ran).toEqual(['a', 'c'])
+  })
+
+  it('honours pause called from inside a callback before the next due timer runs', () => {
+    const { at, ran, time, note } = made()
+    time.after(10, () => { ran.push('a'); time.pause() })
+    time.after(10, note('b'))
+    at.wake()
+    expect(ran).toEqual(['a'])
+    expect(at.turns).toBe(0)
+    expect(at.timers).toEqual([])
+    at.mono = 500
+    time.resume()
+    at.settle()
+    expect(ran).toEqual(['a', 'b'])
+  })
+
+  it('honours close called from inside a callback and drops remaining due timers', () => {
+    const { at, ran, time, note } = made()
+    time.after(10, () => { ran.push('a'); time.close() })
+    time.after(10, note('b'))
+    time.after(20, note('c'))
+    at.wake()
+    at.settle()
+    expect(ran).toEqual(['a'])
+    expect(time.pending()).toBe(0)
+    expect(at.timers).toEqual([])
+    expect(at.turns).toBe(0)
   })
 
   it('goes on to what waits after something it ran threw, and hands on what was thrown', () => {
@@ -228,11 +307,13 @@ describe('the time it is', () => {
     expect(time.now()).toBe(1_000_250)
   })
 
-  it('never says a time earlier than it said, where the time of day is set back', () => {
+  it('never says a time earlier than it said, where the time of day is set back, and ignores NaN', () => {
     const { at, time } = made()
     at.wall = 5_000
     expect(time.now()).toBe(5_000)
     at.wall = 3_000
+    expect(time.now()).toBe(5_000)
+    at.wall = Number.NaN
     expect(time.now()).toBe(5_000)
     at.wall = 5_001
     expect(time.now()).toBe(5_001)
@@ -308,9 +389,46 @@ describe('stopping the count', () => {
   })
 })
 
+describe('closing and disposal', () => {
+  it('clears pending work and timers on close, ignores later asks/pause/resume/turns, and is idempotent', () => {
+    const { at, ran, time, note } = made()
+    const offA = time.after(10, note('a'))
+    time.after(0, note('zero'))
+    time.pause()
+    time.close()
+    time.close()
+    expect(time.pending()).toBe(0)
+    expect(at.timers).toEqual([])
+    // Calling an old cancel handle, asking for more work, or pausing/resuming after close are all no-ops.
+    offA()
+    const offLate = time.after(5, note('late'))
+    expect(time.pending()).toBe(0)
+    expect(at.timers).toEqual([])
+    offLate()
+    time.pause()
+    time.resume()
+    at.settle()
+    expect(ran).toEqual([])
+    expect(time.pending()).toBe(0)
+    expect(at.timers).toEqual([])
+  })
+
+  it('disposes via Symbol.dispose (`using`)', () => {
+    const at = world()
+    const ran: string[] = []
+    {
+      using time = clock(at.sources)
+      time.after(50, () => { ran.push('never') })
+      expect(at.timers).toHaveLength(1)
+    }
+    expect(at.timers).toEqual([])
+    expect(ran).toEqual([])
+  })
+})
+
 describe('on the real time and timers', () => {
   it('runs what is due, in order, each in a turn of its own, and not what was called off', async () => {
-    const time = clock()
+    using time = clock()
     const ran: string[] = []
     let turnsOver = 0
     time.after(15, () => { ran.push('second') })
@@ -325,12 +443,16 @@ describe('on the real time and timers', () => {
     expect(Math.abs(time.now() - Date.now())).toBeLessThan(5_000)
   })
 
-  it('leaves no timer set once what it was for is called off', () => {
+  it('leaves no timer set once what it was for is called off or the clock is closed', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const time = clock()
     const off = time.after(60_000, () => {})
     expect(vi.getTimerCount()).toBe(1)
     off()
+    expect(vi.getTimerCount()).toBe(0)
+    time.after(60_000, () => {})
+    expect(vi.getTimerCount()).toBe(1)
+    time.close()
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -338,13 +460,31 @@ describe('on the real time and timers', () => {
     const real = setImmediate
     let asked = 0
     vi.stubGlobal('setImmediate', (run: () => void) => { asked++; return real(run) })
-    const time = clock()
+    using time = clock()
     await time.sleep(0)
     expect(asked).toBe(1)
   })
 
-  it('takes its turns from a message channel where there is no setImmediate, as in a window, in the order asked', async () => {
+  it('takes its turns from a message channel where there is no setImmediate, reuses it, and closes it on close()', async () => {
     vi.stubGlobal('setImmediate', undefined)
+    const RealMessageChannel = MessageChannel
+    let created = 0
+    let port1Closed = 0
+    let port2Closed = 0
+    vi.stubGlobal('MessageChannel', class {
+      port1: InstanceType<typeof RealMessageChannel>['port1']
+      port2: InstanceType<typeof RealMessageChannel>['port2']
+      constructor() {
+        created++
+        const real = new RealMessageChannel()
+        const close1 = real.port1.close.bind(real.port1)
+        const close2 = real.port2.close.bind(real.port2)
+        real.port1.close = () => { port1Closed++; close1() }
+        real.port2.close = () => { port2Closed++; close2() }
+        this.port1 = real.port1
+        this.port2 = real.port2
+      }
+    })
     const time = clock()
     const ran: string[] = []
     let turnsOver = 0
@@ -353,6 +493,16 @@ describe('on the real time and timers', () => {
     time.after(0, () => { ran.push('c') })
     await time.sleep(20)
     expect(ran).toEqual(['a', 'b after 1', 'c'])
+    expect(created).toBe(1)
+    time.close()
+    expect(port1Closed).toBe(1)
+    expect(port2Closed).toBe(1)
+    // Closing twice does not double-close ports; closing an unused clock creates no channel.
+    time.close()
+    expect(port1Closed).toBe(1)
+    const unused = clock()
+    unused.close()
+    expect(created).toBe(1)
   })
 })
 

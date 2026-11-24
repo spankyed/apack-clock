@@ -1,6 +1,7 @@
 // A clock held to what a clock is with nothing about how: a list of things, each with the moment it is due. Runs
-// drawn from a seed ask for things, call them off, stop and start the count, set the time of day, and wake the clock
-// on time, late, very late and early, and after every one of those what holds is checked.
+// drawn from a seed ask for things, call them off (including re-entrantly), stop and start the count, throw from
+// callbacks, set the time of day, wake the clock on time, late, very late and early (including sub-ms jitter),
+// fire stale cancelled timers, and close the clock — checking every invariant after every step.
 import { describe, expect, it } from 'vitest'
 import { clock, LONGEST } from '../src/index.ts'
 import { world } from './support/world.ts'
@@ -43,8 +44,19 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
         holds(first() === thing, `${thing.id} ran ahead of ${first()?.id}, which was due first`)
         holds(++inTurn === 1, `${thing.id} ran in a turn something else had run in`)
         thing.state = 'ran'
-        // What is asked for as something runs is taken like anything else.
-        if (random.int(4) === 0) ask(random.pick([0, 0, 3, 40]))
+        // Re-entrant asks, cancels, pauses, and throws from inside a callback.
+        const action = random.int(10)
+        if (action < 2) {
+          ask(random.pick([0, 0, 3, 40]))
+        } else if (action === 2) {
+          const other = random.pick(waits().length ? waits() : [undefined])
+          if (other) { other.off(); other.state = 'off' }
+        } else if (action === 3) {
+          time.pause()
+          stopped = at.mono
+        } else if (action === 4) {
+          throw new Error(`boom-${thing.id}`)
+        }
       }),
     }
     things.push(thing)
@@ -53,9 +65,13 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
   const turn = (what: string, go: () => void): void => {
     did.push(`${what} (at ${at.mono}${stopped === undefined ? '' : ', stopped'})`)
     inTurn = 0
-    go()
+    try { go() } catch (error) {
+      if (!(error instanceof Error && error.message.startsWith('boom-'))) throw error
+    }
   }
   const check = (): void => {
+    const live = waits()
+    holds(time.pending() === live.length, `pending() is ${time.pending()}, expected ${live.length}`)
     holds(at.timers.length <= 1, `${at.timers.length} timers are set`)
     for (const ms of at.set) holds(ms > 0 && ms <= LONGEST, `a timer was set for ${ms}`)
     const next = first()
@@ -64,9 +80,13 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     } else if (at.turns === 0) {
       // At rest: nothing due is left waiting, and the timer is for the first of what is not, or as far as one goes.
       holds(!next || next.due > at.mono, `${next?.id} was due at ${next?.due} and is left waiting at ${at.mono}`)
-      holds(at.timers.length === (next ? 1 : 0), `${at.timers.length} timers are set with ${waits().length} things waiting`)
+      holds(at.timers.length === (next ? 1 : 0), `${at.timers.length} timers are set with ${live.length} things waiting`)
       const timer = at.timers[0]
-      if (timer && next) holds(timer.at === next.due || (timer.ms === LONGEST && timer.at < next.due), `the timer is for ${timer.at}, and ${next.id} is due at ${next.due}`)
+      if (timer && next) {
+        const expectedDelay = Math.min(Math.ceil(next.due - at.mono), LONGEST)
+        holds(timer.at >= next.due || (timer.ms === LONGEST && timer.at < next.due), `the timer is for ${timer.at}, and ${next.id} is due at ${next.due}`)
+        holds(timer.at <= Math.max(next.due, at.mono + expectedDelay) + 1, `the timer overshot ${next.due} at ${timer.at}`)
+      }
     } else {
       holds(at.timers.length === 0, 'a timer is set while something due waits for its turn')
     }
@@ -78,22 +98,27 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
   }
 
   for (let step = 0; step < steps; step++) {
-    const what = random.int(12)
+    const what = random.int(13)
     if (what < 4) {
-      const ms = random.pick([0, 0, 1, 5, 5, 20, 100, 1_000, -3, LONGEST + 7, LONGEST * 3])
+      const ms = random.pick([0, 0, 0.4, 1, 5, 5, 20, 100, 1_000, -3, LONGEST + 7, LONGEST * 3])
       turn(`asked for ${ms}`, () => { ask(ms) })
     } else if (what < 6) {
       const thing = random.pick(things.length ? things : [undefined])
       if (thing) turn(`called off ${thing.id}`, () => { thing.off(); if (thing.state === 'waits') thing.state = 'off' })
     } else if (what < 9) {
       if (at.timers.length === 1) {
-        const late = random.pick([0, 0, 0, 1, 7, 60_000, LONGEST, -1, -4])
+        const late = random.pick([0, 0, 0, 0.3, 1, 7, 60_000, LONGEST, -0.4, -1, -4])
         turn(`woke ${late} late`, () => { at.wake(late) })
       }
     } else if (what < 10) {
       turn('a turn', () => { at.turn() })
     } else if (what < 11) {
       turn('the time of day was set', () => { at.wall += random.pick([1, 500, -500, -86_400_000, 3_600_000]) })
+    } else if (what < 12) {
+      if (at.cancelled.length > 0) {
+        const stale = random.pick(at.cancelled)
+        turn('spurious stale wakeup', () => { stale() })
+      }
     } else if (stopped === undefined) {
       turn('stopped', () => { time.pause(); stopped = at.mono })
     } else {
@@ -110,11 +135,26 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     if (random.int(3)) while (at.turns) { turn('a turn', () => { at.turn() }); check() }
   }
 
+  // Every 10th run closes mid-flight and verifies nothing fires after close; the rest drain to completion.
+  if (seed % 10 === 0) {
+    turn('closed', () => { time.close() })
+    holds(time.pending() === 0, `pending() after close is ${time.pending()}`)
+    holds(at.timers.length === 0, `timers after close: ${at.timers.length}`)
+    const ranBefore = things.filter((thing) => thing.state === 'ran').length
+    at.settle()
+    holds(things.filter((thing) => thing.state === 'ran').length === ranBefore, 'something ran after close')
+    return { ran: ranBefore, hops: 0 }
+  }
+
   // Everything left runs, in the end, however far off it is.
-  if (stopped !== undefined) turn('went on', () => { const span = at.mono - stopped!; for (const thing of waits()) thing.due += span; stopped = undefined; time.resume() })
   let hops = 0
   for (;;) {
+    if (stopped !== undefined) {
+      turn('went on', () => { const span = at.mono - stopped!; for (const thing of waits()) thing.due += span; stopped = undefined; time.resume() })
+      check()
+    }
     while (at.turns) { turn('a turn', () => { at.turn() }); check() }
+    if (stopped !== undefined) continue
     if (!at.timers.length) break
     hops++
     holds(hops < 10_000, 'still waking after 10 000 timers')
@@ -122,11 +162,12 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     check()
   }
   holds(waits().length === 0, `${waits().map((thing) => thing.id).join(', ')} never ran`)
+  holds(time.pending() === 0, `pending() at end is ${time.pending()}`)
   return { ran: things.filter((thing) => thing.state === 'ran').length, hops }
 }
 
 describe('a clock, under runs drawn from a seed', () => {
-  it('runs nothing early, twice, out of turn, called off or while stopped, runs everything in the end, and keeps one timer for what is first', () => {
+  it('runs nothing early, twice, out of turn, called off, while stopped, or after close, runs everything in the end, and keeps one timer for what is first', () => {
     let ran = 0
     for (let seed = 1; seed <= 400; seed++) ran += run(seed, 80).ran
     // The runs do something: thousands of things ran across them.
