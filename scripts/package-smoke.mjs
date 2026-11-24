@@ -21,7 +21,7 @@ try {
   run(['install', '--no-audit', '--no-fund', '--no-package-lock', tarball], consumer)
   fs.writeFileSync(path.join(consumer, 'entries.mjs'), `
 import * as clock from '@apackdev/clock'
-for (const name of ['clock']) if (typeof clock[name] !== 'function') throw new Error('@apackdev/clock has no ' + name)
+for (const name of ['clock', 'ClockClosedError']) if (typeof clock[name] !== 'function') throw new Error('@apackdev/clock has no ' + name)
 if (clock.LONGEST !== 0x7fffffff) throw new Error('@apackdev/clock has no LONGEST')
 `)
   execFileSync(process.execPath, ['entries.mjs'], { cwd: consumer, stdio: 'inherit' })

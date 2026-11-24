@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { clock, LONGEST } from '../src/index.ts'
+import { clock, ClockClosedError, LONGEST, type Clock, type ManagedClock } from '../src/index.ts'
 import { world } from './support/world.ts'
 
 /** A clock in a world, and what ran, in the order it ran. */
@@ -150,14 +150,43 @@ describe('what runs, and when', () => {
     expect(at.turns).toBe(0)
   })
 
-  it('resolves a sleep when that long has passed', async () => {
+  it('resolves a sleep when that long has passed and removes its abort listener', async () => {
     const { at, ran, time } = made()
-    void time.sleep(50).then(() => { ran.push('woke') })
+    const controller = new AbortController()
+    const remove = vi.spyOn(controller.signal, 'removeEventListener')
+    const waiting = time.sleep(50, { signal: controller.signal }).then(() => { ran.push('woke') })
     await Promise.resolve()
     expect(ran).toEqual([])
     at.wake()
-    await Promise.resolve()
+    await waiting
     expect(ran).toEqual(['woke'])
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
+    // Aborting after resolution does nothing, and closing later does nothing.
+    controller.abort(new Error('too late'))
+    time.close()
+  })
+
+  it('aborts a sleep via AbortSignal, cancels its timer, and rejects already-aborted or non-finite sleeps', async () => {
+    const { at, time } = made()
+    await expect(time.sleep(Number.NaN)).rejects.toThrow(RangeError)
+
+    const already = new AbortController()
+    const reason = new Error('stopped already')
+    already.abort(reason)
+    const addSpy = vi.spyOn(already.signal, 'addEventListener')
+    await expect(time.sleep(50, { signal: already.signal })).rejects.toBe(reason)
+    expect(addSpy).not.toHaveBeenCalled()
+    expect(time.pending()).toBe(0)
+    expect(at.timers).toEqual([])
+
+    const live = new AbortController()
+    const liveReason = new Error('cancelled mid-sleep')
+    const waiting = time.sleep(50, { signal: live.signal })
+    expect(time.pending()).toBe(1)
+    live.abort(liveReason)
+    await expect(waiting).rejects.toBe(liveReason)
+    expect(time.pending()).toBe(0)
+    expect(at.timers).toEqual([])
   })
 })
 
@@ -307,13 +336,15 @@ describe('the time it is', () => {
     expect(time.now()).toBe(1_000_250)
   })
 
-  it('never says a time earlier than it said, where the time of day is set back, and ignores NaN', () => {
+  it('never says a time earlier than it said, where the time of day is set back, and ignores non-finite values', () => {
     const { at, time } = made()
     at.wall = 5_000
     expect(time.now()).toBe(5_000)
     at.wall = 3_000
     expect(time.now()).toBe(5_000)
     at.wall = Number.NaN
+    expect(time.now()).toBe(5_000)
+    at.wall = Number.POSITIVE_INFINITY
     expect(time.now()).toBe(5_000)
     at.wall = 5_001
     expect(time.now()).toBe(5_001)
@@ -413,6 +444,29 @@ describe('closing and disposal', () => {
     expect(at.timers).toEqual([])
   })
 
+  it('rejects pending and later sleeps with ClockClosedError on close and removes their abort listeners', async () => {
+    const { at, time } = made()
+    const controller = new AbortController()
+    const remove = vi.spyOn(controller.signal, 'removeEventListener')
+    const waiting = time.sleep(100, { signal: controller.signal })
+    time.close()
+    await expect(waiting).rejects.toSatisfy((error: unknown) =>
+      error instanceof ClockClosedError && error.name === 'ClockClosedError' && error.message === 'The clock is closed',
+    )
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
+    await expect(time.sleep(10)).rejects.toBeInstanceOf(ClockClosedError)
+    expect(at.timers).toEqual([])
+  })
+
+  it('separates consumer Clock capability from ManagedClock lifecycle', () => {
+    const managed: ManagedClock = clock(world().sources)
+    const consumer: Clock = managed
+    expect(typeof consumer.now).toBe('function')
+    expect(typeof consumer.after).toBe('function')
+    expect(typeof consumer.sleep).toBe('function')
+    managed.close()
+  })
+
   it('disposes via Symbol.dispose (`using`)', () => {
     const at = world()
     const ran: string[] = []
@@ -456,13 +510,24 @@ describe('on the real time and timers', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('takes its turns from setImmediate where there is one', async () => {
-    const real = setImmediate
+  it('takes its turns from setImmediate where there is one, and cancels pending immediates on close()', async () => {
+    const realSet = setImmediate
+    const realClear = clearImmediate
     let asked = 0
-    vi.stubGlobal('setImmediate', (run: () => void) => { asked++; return real(run) })
+    let cleared = 0
+    vi.stubGlobal('setImmediate', (run: () => void) => { asked++; return realSet(run) })
+    vi.stubGlobal('clearImmediate', (handle: ReturnType<typeof setImmediate>) => { cleared++; return realClear(handle) })
     using time = clock()
     await time.sleep(0)
     expect(asked).toBe(1)
+    expect(cleared).toBe(0)
+    // A pending immediate queued when close() runs is cleared immediately.
+    time.after(0, () => {})
+    time.close()
+    expect(cleared).toBe(1)
+    // Closing again does not double-clear.
+    time.close()
+    expect(cleared).toBe(1)
   })
 
   it('takes its turns from a message channel where there is no setImmediate, reuses it, and closes it on close()', async () => {
@@ -471,6 +536,7 @@ describe('on the real time and timers', () => {
     let created = 0
     let port1Closed = 0
     let port2Closed = 0
+    let lastPort1: { onmessage: unknown } | undefined
     vi.stubGlobal('MessageChannel', class {
       port1: InstanceType<typeof RealMessageChannel>['port1']
       port2: InstanceType<typeof RealMessageChannel>['port2']
@@ -483,6 +549,7 @@ describe('on the real time and timers', () => {
         real.port2.close = () => { port2Closed++; close2() }
         this.port1 = real.port1
         this.port2 = real.port2
+        lastPort1 = real.port1 as unknown as { onmessage: unknown }
       }
     })
     const time = clock()
@@ -495,6 +562,7 @@ describe('on the real time and timers', () => {
     expect(ran).toEqual(['a', 'b after 1', 'c'])
     expect(created).toBe(1)
     time.close()
+    expect(lastPort1?.onmessage).toBeNull()
     expect(port1Closed).toBe(1)
     expect(port2Closed).toBe(1)
     // Closing twice does not double-close ports; closing an unused clock creates no channel.

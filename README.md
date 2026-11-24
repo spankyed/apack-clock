@@ -23,14 +23,17 @@ first, second
 
 ## What a clock is
 
+Consumers take a `Clock` (read time and wait, without authority to pause or close the host's clock); whoever owns
+the clock holds the `ManagedClock` returned by `clock()`.
+
 | | |
 |---|---|
 | `after(ms, run)` | Runs `run` once, when `ms` have passed, unless what it returns is called first |
-| `sleep(ms)` | A promise that resolves when `ms` have passed |
+| `sleep(ms, { signal })` | Resolves when `ms` have passed; rejects with `signal.reason` on abort, `ClockClosedError` on close, or `RangeError` for non-finite `ms` |
 | `now()` | The time it is, in milliseconds since 1970 |
-| `pending()` | How many things are currently waiting to run |
-| `pause()` / `resume()` | Stops and starts the count: what passes between is counted against nothing that waits |
-| `close()` / `[Symbol.dispose]()` | Calls off everything waiting, clears the underlying timer, and runs nothing after |
+| `pending()` | *(ManagedClock)* How many things are currently waiting to run |
+| `pause()` / `resume()` | *(ManagedClock)* Stops and starts the count: what passes between is counted against nothing that waits |
+| `close()` / `[Symbol.dispose]()` | *(ManagedClock)* Calls off everything waiting, clears the underlying timer, rejects pending sleeps with `ClockClosedError`, and runs nothing after |
 
 `clock()` reads the real time and sets real timers. `clock({ monotonic, wall, timer, turn })` takes any of the four
 from whoever makes it (`Sources`), which is how its own specs choose when each thing happens.
@@ -45,8 +48,8 @@ code written against one runs on the other: a program is handed this, and a spec
   again each time the clock is woken: a timer that comes back before its time runs nothing, and sub-millisecond
   remainders round up so OS jitter never spins at `0 ms`.
 - **Setting the time of day moves nothing that waits.** `after` does not read it.
-- **The time it is never goes back.** Where the time of day is set back (or reads `NaN`), `now()` says what it said
-  before until the time of day has passed that.
+- **The time it is never goes back.** Where the time of day is set back (or reads a non-finite value), `now()`
+  says what it said before until the time of day has passed that.
 - **One indexed heap and one timer, for what is due first**, however many things wait, and none once nothing does or
   after `close()`. Removing on cancel is $O(\log n)$ with no dead entries left behind.
 - **No mid-callback timer churn, and stale wakeups are ignored.** What a callback asks for or calls off is settled

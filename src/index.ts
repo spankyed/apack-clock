@@ -23,7 +23,21 @@ export interface Sources {
   turn(run: () => void): void
 }
 
-export interface Clock extends Disposable {
+export interface SleepOptions {
+  /** Aborts the sleep, cancelling its timer and rejecting with `signal.reason`. */
+  readonly signal?: AbortSignal
+}
+
+/** Rejected with when a clock is closed while a `sleep` is waiting, or when `sleep` is called on a closed clock. */
+export class ClockClosedError extends Error {
+  constructor() {
+    super('The clock is closed')
+    this.name = 'ClockClosedError'
+  }
+}
+
+/** Consumer-facing clock capability: read time and wait, without authority to pause or close the host's clock. */
+export interface Clock {
   /**
    * The time it is, in milliseconds since 1970, and never earlier than this clock last said: where the time of day
    * is set back, it says what it said before until the time of day has passed that.
@@ -36,8 +50,15 @@ export interface Clock extends Disposable {
    * finite length of time.
    */
   after(ms: number, run: () => void): () => void
-  /** Resolves when `ms` have passed, as `after` runs. */
-  sleep(ms: number): Promise<void>
+  /**
+   * Resolves when `ms` have passed, as `after` runs. Rejects with `signal.reason` if `options.signal` aborts, with
+   * `ClockClosedError` if the clock is closed, or with `RangeError` for a non-finite `ms`.
+   */
+  sleep(ms: number, options?: SleepOptions): Promise<void>
+}
+
+/** Host-owned clock handle, adding lifecycle and inspection controls over `Clock`. */
+export interface ManagedClock extends Clock, Disposable {
   /** How many things are currently waiting to run. */
   pending(): number
   /**
@@ -47,7 +68,7 @@ export interface Clock extends Disposable {
   pause(): void
   /** Counts again from here. */
   resume(): void
-  /** Calls off everything waiting, clears the underlying timer, and runs nothing after. */
+  /** Calls off everything waiting, clears the underlying timer, rejects pending sleeps, and runs nothing after. */
   close(): void
 }
 
@@ -69,17 +90,32 @@ const before = (a: Entry, b: Entry): boolean =>
 /** A later turn of the event loop, where there is `setImmediate` and where there is not. */
 const makeTurns = (): { readonly turn: Sources['turn']; close(): void } => {
   if (typeof setImmediate === 'function') {
-    return { turn: (run) => { setImmediate(run) }, close: () => {} }
+    const handles = new Set<ReturnType<typeof setImmediate>>()
+    return {
+      turn: (run) => {
+        const handle = setImmediate(() => {
+          handles.delete(handle)
+          run()
+        })
+        handles.add(handle)
+      },
+      close: () => {
+        for (const handle of handles) clearImmediate(handle)
+        handles.clear()
+      },
+    }
   }
   const asked: Array<() => void> = []
   let channel: InstanceType<typeof MessageChannel> | undefined
+  let port1: { onmessage: (() => void) | null; unref?: () => void } | undefined
   return {
     turn: (run) => {
       if (!channel) {
         channel = new MessageChannel()
         // Node's types leave a port's `onmessage` out, and it is what a window and Node both have.
-        const port1 = channel.port1 as unknown as { onmessage: () => void; unref?: () => void }
-        port1.onmessage = () => { asked.shift()!() }
+        port1 = channel.port1 as unknown as { onmessage: (() => void) | null; unref?: () => void }
+        // Stryker disable next-line OptionalChaining: guards against an in-flight port message arriving during close.
+        port1.onmessage = () => { asked.shift()?.() }
         // Stryker disable next-line OptionalChaining: unref exists in Node and not in a browser window.
         port1.unref?.()
       }
@@ -88,16 +124,18 @@ const makeTurns = (): { readonly turn: Sources['turn']; close(): void } => {
     },
     close: () => {
       if (!channel) return
+      port1!.onmessage = null
       channel.port1.close()
       channel.port2.close()
       channel = undefined
+      port1 = undefined
       asked.length = 0
     },
   }
 }
 
 /** Makes a clock: on the real time and timers, or on what it is given in place of each. */
-export function clock(given: Partial<Sources> = {}): Clock {
+export function clock(given: Partial<Sources> = {}): ManagedClock {
   const ownedTurns = given.turn ? undefined : makeTurns()
   const from: Sources = {
     monotonic: given.monotonic ?? (() => performance.now()),
@@ -119,6 +157,8 @@ export function clock(given: Partial<Sources> = {}): Clock {
   let paused: number | undefined
   let closed = false
   let said = Number.NEGATIVE_INFINITY
+  /** Pending `sleep()` waiters settled with `ClockClosedError` if the clock closes first. */
+  const sleepers = new Set<() => void>()
 
   const place = (index: number, entry: Entry): void => {
     heap[index] = entry
@@ -207,8 +247,12 @@ export function clock(given: Partial<Sources> = {}): Clock {
     try { first.run() } finally { running = false; arm() }
   }
 
-  const after: Clock['after'] = (ms, run) => {
+  const assertFinite = (ms: number): void => {
     if (!Number.isFinite(ms)) throw new RangeError(`A clock is asked for a finite length of time, and was given ${String(ms)}`)
+  }
+
+  const after: Clock['after'] = (ms, run) => {
+    assertFinite(ms)
     if (closed) return () => {}
     const entry: Entry = { due: (paused ?? from.monotonic()) + Math.max(0, ms), seq: nextSeq++, run, index: heap.length }
     const wasHead = heap[0]
@@ -222,6 +266,34 @@ export function clock(given: Partial<Sources> = {}): Clock {
     }
   }
 
+  const sleep: Clock['sleep'] = (ms, options) => new Promise((resolve, reject) => {
+    assertFinite(ms)
+    const signal = options?.signal
+    if (signal?.aborted) { reject(signal.reason); return }
+    if (closed) { reject(new ClockClosedError()); return }
+
+    const cleanup = (): void => {
+      sleepers.delete(onClose)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const onAbort = (): void => {
+      cleanup()
+      cancel()
+      reject(signal!.reason)
+    }
+    const onClose = (): void => {
+      cleanup()
+      reject(new ClockClosedError())
+    }
+
+    sleepers.add(onClose)
+    signal?.addEventListener('abort', onAbort)
+    const cancel = after(ms, () => {
+      cleanup()
+      resolve()
+    })
+  })
+
   const close = (): void => {
     closed = true
     paused = undefined
@@ -229,16 +301,17 @@ export function clock(given: Partial<Sources> = {}): Clock {
     for (const entry of heap) entry.index = -1
     heap.length = 0
     ownedTurns?.close()
+    for (const onClose of [...sleepers]) onClose()
   }
 
   return {
     now: () => {
       const wall = from.wall()
-      if (!Number.isNaN(wall)) said = Math.max(said, wall)
+      if (Number.isFinite(wall)) said = Math.max(said, wall)
       return said
     },
     after,
-    sleep: (ms) => new Promise((resolve) => { after(ms, resolve) }),
+    sleep,
     pending: () => heap.length,
     pause: () => {
       if (closed || paused !== undefined) return
