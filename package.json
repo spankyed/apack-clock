@@ -34,6 +34,7 @@
     "test:browser": "vitest run --project browser",
     "test:watch": "vitest",
     "prepack": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && npm run build",
+    "package:check": "node scripts/package-check.mjs",
     "package:lint": "node scripts/package-lint.mjs",
     "package:smoke": "node scripts/package-smoke.mjs",
     "workflows:check": "node scripts/workflows-check.mjs",

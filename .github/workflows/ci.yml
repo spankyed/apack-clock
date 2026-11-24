@@ -34,6 +34,8 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run workflows:check
+      # Build determinism (byte-for-byte), emitted size ceilings, and steady-state timer cost.
+      - run: npm run package:check
       # The package as a consumer gets it: packed, installed elsewhere, typechecked on TS 5.7, and the README example run.
       - run: npm run package:smoke
       # The packed package as published code: its manifest and files (publint), and each entry's types (attw).
