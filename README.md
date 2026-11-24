@@ -31,8 +31,9 @@ first, second
 ## Wiring the host
 
 The host constructs one `ClockController`, hands `controller.clock` to subsystems, wires OS sleep notifications if it
-receives them, and closes the controller on shutdown. Every controller method is bound, so it can be passed directly
-as a listener:
+receives them, and closes the controller on shutdown. Shut down subsystems before calling `controller.close()`
+(calling `close()` or a previously returned cancel function more than once is a no-op). Every controller method is
+bound, so it can be passed directly as a listener:
 
 ```ts
 const controller = new ClockController()

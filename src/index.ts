@@ -200,12 +200,14 @@ export class ClockController {
       place(index, entry)
     }
 
-    const push = (entry: Entry): void => {
+    const push = (due: number, run: () => void): Entry => {
+      const entry: Entry = { due, seq: nextSeq++, run, index: heap.length }
       heap.push(entry)
       siftUp(entry.index)
+      return entry
     }
 
-    const removeAt = (index: number): Entry => {
+    const removeAt = (index: number): void => {
       const removed = heap[index]!
       const last = heap.pop()!
       removed.index = -1
@@ -214,7 +216,6 @@ export class ClockController {
         if (index > 0 && before(last, heap[(index - 1) >> 1]!)) siftUp(index)
         else siftDown(index)
       }
-      return removed
     }
 
     const disarm = (): void => {
@@ -269,9 +270,8 @@ export class ClockController {
     const after: Clock['after'] = (ms, run) => {
       assertFinite(ms)
       if (closed) throw new ClockClosedError()
-      const entry: Entry = { due: (suspended ?? from.monotonic()) + Math.max(0, ms), seq: nextSeq++, run, index: heap.length }
       const wasHead = heap[0]
-      push(entry)
+      const entry = push((suspended ?? from.monotonic()) + Math.max(0, ms), run)
       if (heap[0] !== wasHead) arm()
       return () => {
         if (entry.index < 0) return
@@ -285,11 +285,8 @@ export class ClockController {
       assertFinite(ms)
       const signal = options?.signal
       if (signal?.aborted) { reject(signal.reason); return }
-      const cancel = after(ms, () => {
-        cleanup()
-        resolve()
-      })
 
+      let cancel: () => void
       const cleanup = (): void => {
         sleepers.delete(onClose)
         signal?.removeEventListener('abort', onAbort)
@@ -304,6 +301,10 @@ export class ClockController {
         reject(new ClockClosedError())
       }
 
+      cancel = after(ms, () => {
+        cleanup()
+        resolve()
+      })
       sleepers.add(onClose)
       signal?.addEventListener('abort', onAbort)
     })
