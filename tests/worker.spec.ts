@@ -27,7 +27,7 @@ describe('in a dedicated Web Worker', () => {
         ran: ['zero-1', 'zero-2:1', 'delayed'],
         abortResult: 'worker-abort',
         closedAfter: true,
-        pending: 0,
+        waiting: 0,
       })
     } finally {
       worker.terminate()

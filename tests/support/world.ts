@@ -1,9 +1,9 @@
-import type { Sources } from '../../src/index.ts'
+import type { ClockSources } from '../../src/index.ts'
 import { checkedSources } from './checked-sources.ts'
 
 /** What a clock is given in a spec: time that moves only when told to, and timers and turns that run only when told to. */
 export interface World {
-  readonly sources: Sources
+  readonly sources: ClockSources
   /** The clock that only goes forward. */
   mono: number
   /** The time of day. */

@@ -23,23 +23,37 @@ try {
   run(['install', '--no-audit', '--no-fund', '--no-package-lock', tarball], consumer)
   fs.writeFileSync(path.join(consumer, 'entries.mjs'), `
 import * as clock from '@apackdev/clock'
-for (const name of ['clock', 'ClockClosedError']) if (typeof clock[name] !== 'function') throw new Error('@apackdev/clock has no ' + name)
-if (clock.LONGEST !== 0x7fffffff) throw new Error('@apackdev/clock has no LONGEST')
+for (const name of ['ClockController', 'ClockClosedError']) if (typeof clock[name] !== 'function') throw new Error('@apackdev/clock has no ' + name)
+if (clock.MAX_TIMER_MS !== 0x7fffffff) throw new Error('@apackdev/clock has no MAX_TIMER_MS')
 `)
   execFileSync(process.execPath, ['entries.mjs'], { cwd: consumer, stdio: 'inherit' })
   fs.writeFileSync(path.join(consumer, 'consumer.ts'), `
-import { clock, ClockClosedError, LONGEST, type Clock, type ManagedClock } from '@apackdev/clock'
+import {
+  ClockController,
+  ClockClosedError,
+  MAX_TIMER_MS,
+  type Clock,
+  type ClockSleepOptions,
+  type ClockSources,
+} from '@apackdev/clock'
 
 const minimal: Clock = { now: () => 0, after: () => () => {}, sleep: async () => {} }
-const managed: ManagedClock = clock()
-const handoff: Clock = managed.view()
+const controller = new ClockController()
+const handoff: Clock = controller.clock
+// @ts-expect-error ClockController must not be assignable to Clock.
+const leaked: Clock = controller
 // @ts-expect-error Consumer Clock must not expose host close().
 void handoff.close
-// @ts-expect-error Consumer Clock must not expose view().
-void handoff.view
+// @ts-expect-error Consumer Clock must not expose host suspend().
+void handoff.suspend
+const opts: ClockSleepOptions = {}
+const partial: Partial<ClockSources> = {}
 void minimal
+void leaked
+void opts
+void partial
 void ClockClosedError
-void LONGEST
+void MAX_TIMER_MS
 `)
   const tsc57 = path.join(root, 'node_modules', 'typescript-5.7', 'bin', 'tsc')
   // 1. Browser ES2023+DOM consumer (`types: []`, no `ESNext.Disposable`, `skipLibCheck: false`): proves dist/index.d.ts

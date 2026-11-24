@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { clock, LONGEST, type Sources } from '../src/index.ts'
+import { ClockController, MAX_TIMER_MS, type ClockSources } from '../src/index.ts'
 import { checkedSources, SourceContractError } from './support/checked-sources.ts'
 
-const validSources = (): Sources => ({
+const validSources = (): ClockSources => ({
   monotonic: () => 10,
   wall: () => 1_000,
   timer: () => () => {},
@@ -48,7 +48,7 @@ describe('source contracts (assume–guarantee monitor)', () => {
 
   it('fails loudly when a caller asks timer() for an invalid delay or arms two timers at once', () => {
     const checked = checkedSources(validSources())
-    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, LONGEST + 1]) {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, MAX_TIMER_MS + 1]) {
       expect(() => checked.timer(bad, () => {})).toThrow(SourceContractError)
     }
     const cancel = checked.timer(10, () => {})
@@ -66,15 +66,15 @@ describe('source contracts (assume–guarantee monitor)', () => {
       timer: (ms, run) => { const id = setTimeout(run, ms); return () => { clearTimeout(id) } },
       turn: (run) => { setTimeout(run, 0) },
     })
-    const time = clock(real)
+    const controller = new ClockController(real)
     try {
       const ran: string[] = []
-      time.after(0, () => { ran.push('zero') })
-      time.after(10, () => { ran.push('ten') })
-      await time.sleep(30)
+      controller.clock.after(0, () => { ran.push('zero') })
+      controller.clock.after(10, () => { ran.push('ten') })
+      await controller.clock.sleep(30)
       expect(ran).toEqual(['zero', 'ten'])
     } finally {
-      time.close()
+      controller.close()
     }
   })
 })

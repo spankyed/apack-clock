@@ -1,77 +1,77 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { clock, ClockClosedError, LONGEST, type Clock, type ManagedClock } from '../src/index.ts'
+import { ClockController, ClockClosedError, MAX_TIMER_MS, type Clock } from '../src/index.ts'
 import { world } from './support/world.ts'
 
-/** A clock in a world, and what ran, in the order it ran. */
+/** A clock controller in a world, its consumer clock, and what ran, in the order it ran. */
 const made = () => {
   const at = world()
   const ran: string[] = []
-  const time = clock(at.sources)
-  return { at, ran, time, note: (what: string) => () => { ran.push(what) } }
+  const controller = new ClockController(at.sources)
+  return { at, ran, controller, clock: controller.clock, note: (what: string) => () => { ran.push(what) } }
 }
 
 describe('what runs, and when', () => {
   it('runs what was asked for once that long has passed, and not before', () => {
-    const { at, ran, time, note } = made()
-    expect(time.pending()).toBe(0)
-    time.after(100, note('a'))
-    expect(time.pending()).toBe(1)
+    const { at, ran, controller, clock, note } = made()
+    expect(controller.waiting()).toBe(0)
+    clock.after(100, note('a'))
+    expect(controller.waiting()).toBe(1)
     expect(at.timers).toEqual([{ at: 100, ms: 100, run: expect.any(Function) }])
     at.wake()
     expect(ran).toEqual(['a'])
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
   })
 
   it('runs nothing as it is asked: what is due at once has a later turn', () => {
-    const { at, ran, time, note } = made()
-    time.after(0, note('a'))
+    const { at, ran, controller, clock, note } = made()
+    clock.after(0, note('a'))
     expect(ran).toEqual([])
     expect(at.timers).toEqual([])
-    expect(time.pending()).toBe(1)
+    expect(controller.waiting()).toBe(1)
     at.settle()
     expect(ran).toEqual(['a'])
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
   })
 
   it('takes negative finite lengths as nothing', () => {
-    const { at, ran, time, note } = made()
-    time.after(-50, note('a'))
-    time.after(-0.5, note('b'))
+    const { at, ran, clock, note } = made()
+    clock.after(-50, note('a'))
+    clock.after(-0.5, note('b'))
     at.settle()
     expect(ran).toEqual(['a', 'b'])
   })
 
   it('runs in the order things are due, whatever order they were asked in', () => {
-    const { at, ran, time, note } = made()
-    time.after(30, note('c'))
-    time.after(10, note('a'))
-    time.after(20, note('b'))
-    time.after(25, note('b2'))
-    time.after(5, note('a0'))
-    time.after(15, note('a2'))
+    const { at, ran, controller, clock, note } = made()
+    clock.after(30, note('c'))
+    clock.after(10, note('a'))
+    clock.after(20, note('b'))
+    clock.after(25, note('b2'))
+    clock.after(5, note('a0'))
+    clock.after(15, note('a2'))
     // One timer, for the first of them.
     expect(at.timers.map((timer) => timer.at)).toEqual([5])
     while (at.timers.length) at.wake()
     expect(ran).toEqual(['a0', 'a', 'a2', 'b', 'b2', 'c'])
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
   })
 
   it('runs the one set first, of two due at the same moment', () => {
-    const { at, ran, time, note } = made()
-    time.after(10, note('first'))
-    time.after(10, note('second'))
+    const { at, ran, clock, note } = made()
+    clock.after(10, note('first'))
+    clock.after(10, note('second'))
     at.mono = 4
-    time.after(6, note('third'))
-    time.after(6, note('fourth'))
+    clock.after(6, note('third'))
+    clock.after(6, note('fourth'))
     at.wake()
     at.settle()
     expect(ran).toEqual(['first', 'second', 'third', 'fourth'])
   })
 
   it('gives each thing it runs a turn to itself, however many are due', () => {
-    const { at, ran, time, note } = made()
-    for (const name of ['a', 'b', 'c']) time.after(10, note(name))
+    const { at, ran, clock, note } = made()
+    for (const name of ['a', 'b', 'c']) clock.after(10, note(name))
     at.wake(500)
     expect(ran).toEqual(['a'])
     expect(at.timers).toEqual([])
@@ -83,8 +83,8 @@ describe('what runs, and when', () => {
   })
 
   it('runs nothing early when its timer runs before it was set to, rounding sub-ms remainders up', () => {
-    const { at, ran, time, note } = made()
-    time.after(100, note('a'))
+    const { at, ran, clock, note } = made()
+    clock.after(100, note('a'))
     at.wake(-1)
     expect(ran).toEqual([])
     expect(at.timers.map((timer) => timer.ms)).toEqual([1])
@@ -97,12 +97,12 @@ describe('what runs, and when', () => {
   })
 
   it('ignores a spurious wakeup from a timer that was already called off', () => {
-    const { at, ran, time, note } = made()
-    const offA = time.after(100, note('a'))
-    time.after(200, note('b'))
+    const { at, ran, clock, note } = made()
+    const offA = clock.after(100, note('a'))
+    clock.after(200, note('b'))
     offA()
     expect(at.cancelled).toHaveLength(1)
-    // Even if an old timer fires late at t=200, it must not clobber b's timer or run prematurely.
+    // Even if an old timer fires late at t=150, it must not clobber b's timer or run prematurely.
     at.mono = 150
     at.cancelled[0]!()
     expect(ran).toEqual([])
@@ -112,14 +112,14 @@ describe('what runs, and when', () => {
   })
 
   it('runs what is due however late it is woken, and sets its timer for what is not', () => {
-    const { at, ran, time, note } = made()
-    time.after(10, note('a'))
-    time.after(5_000, note('b'))
+    const { at, ran, clock, note } = made()
+    clock.after(10, note('a'))
+    clock.after(5_000, note('b'))
     at.wake(60_000)
     at.settle()
     expect(ran).toEqual(['a', 'b'])
-    time.after(10, note('c'))
-    time.after(900, note('d'))
+    clock.after(10, note('c'))
+    clock.after(900, note('d'))
     at.wake(100)
     at.settle()
     expect(ran).toEqual(['a', 'b', 'c'])
@@ -127,34 +127,34 @@ describe('what runs, and when', () => {
   })
 
   it('waits longer than a timer can be set for, a hop at a time', () => {
-    const { at, ran, time, note } = made()
-    const long = LONGEST * 2 + 500
-    time.after(long, note('a'))
+    const { at, ran, clock, note } = made()
+    const long = MAX_TIMER_MS * 2 + 500
+    clock.after(long, note('a'))
     at.wake()
     at.wake()
     expect(ran).toEqual([])
     at.wake()
     expect(ran).toEqual(['a'])
-    expect(at.set).toEqual([LONGEST, LONGEST, 500])
+    expect(at.set).toEqual([MAX_TIMER_MS, MAX_TIMER_MS, 500])
     expect(at.mono).toBe(long)
   })
 
   it('throws for what is not a finite length of time, and sets nothing', () => {
-    const { at, time } = made()
+    const { at, controller, clock } = made()
     for (const not of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '5' as unknown as number, undefined as unknown as number]) {
-      expect(() => time.after(not, () => {})).toThrow(RangeError)
+      expect(() => clock.after(not, () => {})).toThrow(RangeError)
     }
-    expect(() => time.after(Number.NaN, () => {})).toThrow(/given NaN/)
-    expect(time.pending()).toBe(0)
+    expect(() => clock.after(Number.NaN, () => {})).toThrow(/given NaN/)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
     expect(at.turns).toBe(0)
   })
 
   it('resolves a sleep when that long has passed and removes its abort listener', async () => {
-    const { at, ran, time } = made()
-    const controller = new AbortController()
-    const remove = vi.spyOn(controller.signal, 'removeEventListener')
-    const waiting = time.sleep(50, { signal: controller.signal }).then(() => { ran.push('woke') })
+    const { at, ran, controller, clock } = made()
+    const abort = new AbortController()
+    const remove = vi.spyOn(abort.signal, 'removeEventListener')
+    const waiting = clock.sleep(50, { signal: abort.signal }).then(() => { ran.push('woke') })
     await Promise.resolve()
     expect(ran).toEqual([])
     at.wake()
@@ -162,57 +162,57 @@ describe('what runs, and when', () => {
     expect(ran).toEqual(['woke'])
     expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
     // Aborting after resolution does nothing, and closing later does nothing.
-    controller.abort(new Error('too late'))
-    time.close()
+    abort.abort(new Error('too late'))
+    controller.close()
   })
 
   it('aborts a sleep via AbortSignal, cancels its timer, and rejects already-aborted or non-finite sleeps', async () => {
-    const { at, time } = made()
-    await expect(time.sleep(Number.NaN)).rejects.toThrow(RangeError)
+    const { at, controller, clock } = made()
+    await expect(clock.sleep(Number.NaN)).rejects.toThrow(RangeError)
 
     const already = new AbortController()
     const reason = new Error('stopped already')
     already.abort(reason)
-    await expect(time.sleep(Number.NaN, { signal: already.signal })).rejects.toThrow(RangeError)
+    await expect(clock.sleep(Number.NaN, { signal: already.signal })).rejects.toThrow(RangeError)
     const addSpy = vi.spyOn(already.signal, 'addEventListener')
-    await expect(time.sleep(50, { signal: already.signal })).rejects.toBe(reason)
+    await expect(clock.sleep(50, { signal: already.signal })).rejects.toBe(reason)
     expect(addSpy).not.toHaveBeenCalled()
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
 
     const live = new AbortController()
     const liveReason = new Error('cancelled mid-sleep')
-    const waiting = time.sleep(50, { signal: live.signal })
-    expect(time.pending()).toBe(1)
+    const waiting = clock.sleep(50, { signal: live.signal })
+    expect(controller.waiting()).toBe(1)
     live.abort(liveReason)
     await expect(waiting).rejects.toBe(liveReason)
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
   })
 })
 
 describe('calling off', () => {
   it('does not run what was called off, and sets its timer for what is then first', () => {
-    const { at, ran, time, note } = made()
-    const off = time.after(10, note('a'))
-    time.after(20, note('b'))
+    const { at, ran, controller, clock, note } = made()
+    const off = clock.after(10, note('a'))
+    clock.after(20, note('b'))
     off()
-    expect(time.pending()).toBe(1)
+    expect(controller.waiting()).toBe(1)
     expect(at.timers.map((timer) => timer.at)).toEqual([20])
     at.wake()
     expect(ran).toEqual(['b'])
   })
 
   it('leaves the timer as it is when what is called off was not first, and preserves heap order', () => {
-    const { at, ran, time, note } = made()
+    const { at, ran, clock, note } = made()
     // Build a 7-node heap where removing an interior node triggers siftUp (swap with a smaller leaf on another branch).
-    time.after(10, note('10'))
-    time.after(50, note('50'))
-    time.after(20, note('20'))
-    const off60 = time.after(60, note('60'))
-    const off70 = time.after(70, note('70'))
-    time.after(25, note('25'))
-    time.after(22, note('22'))
+    clock.after(10, note('10'))
+    clock.after(50, note('50'))
+    clock.after(20, note('20'))
+    const off60 = clock.after(60, note('60'))
+    const off70 = clock.after(70, note('70'))
+    clock.after(25, note('25'))
+    clock.after(22, note('22'))
     // Removing 60 replaces it with 22 (which must siftUp past parent 50); removing 70 replaces it with 25 (siftUp past 50).
     off60()
     off70()
@@ -223,17 +223,17 @@ describe('calling off', () => {
   })
 
   it('sets no timer once nothing waits', () => {
-    const { at, time, note } = made()
-    const off = time.after(10, note('a'))
+    const { at, controller, clock, note } = made()
+    const off = clock.after(10, note('a'))
     off()
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
   })
 
   it('does nothing called twice, or after what it would call off has run', () => {
-    const { at, ran, time, note } = made()
-    const first = time.after(10, note('a'))
-    time.after(20, note('b'))
+    const { at, ran, clock, note } = made()
+    const first = clock.after(10, note('a'))
+    clock.after(20, note('b'))
     at.wake()
     first()
     first()
@@ -244,9 +244,9 @@ describe('calling off', () => {
   })
 
   it('does not run what is called off while it waits for its turn', () => {
-    const { at, ran, time, note } = made()
-    const off = time.after(0, note('a'))
-    time.after(0, note('b'))
+    const { at, ran, clock, note } = made()
+    const off = clock.after(0, note('a'))
+    clock.after(0, note('b'))
     off()
     at.settle()
     expect(ran).toEqual(['b'])
@@ -255,18 +255,18 @@ describe('calling off', () => {
 
 describe('what is asked for as something runs', () => {
   it('takes what is asked for from inside what it runs without mid-callback timer churn', () => {
-    const { at, ran, time, note } = made()
-    time.after(10, () => {
+    const { at, ran, clock, note } = made()
+    clock.after(10, () => {
       ran.push('a')
-      const offTemp = time.after(25, note('temp'))
-      time.after(15, note('earlier'))
+      const offTemp = clock.after(25, note('temp'))
+      clock.after(15, note('earlier'))
       offTemp()
-      time.after(50, note('later'))
+      clock.after(50, note('later'))
       // Still inside callback: no new underlying timer has been churned yet.
       expect(at.set).toEqual([10])
-      time.after(0, note('at once'))
+      clock.after(0, note('at once'))
     })
-    time.after(30, note('b'))
+    clock.after(30, note('b'))
     at.wake()
     expect(ran).toEqual(['a'])
     // Only the initial 10ms timer was set; `at once` is handled via turn without arming a timer mid-callback.
@@ -279,48 +279,48 @@ describe('what is asked for as something runs', () => {
   })
 
   it('drops a later due timer cancelled from inside an earlier callback', () => {
-    const { at, ran, time, note } = made()
+    const { at, ran, clock, note } = made()
     let cancelB = () => {}
-    time.after(10, () => { ran.push('a'); cancelB() })
-    cancelB = time.after(10, note('b'))
-    time.after(10, note('c'))
+    clock.after(10, () => { ran.push('a'); cancelB() })
+    cancelB = clock.after(10, note('b'))
+    clock.after(10, note('c'))
     at.wake()
     at.settle()
     expect(ran).toEqual(['a', 'c'])
   })
 
-  it('honours pause called from inside a callback before the next due timer runs', () => {
-    const { at, ran, time, note } = made()
-    time.after(10, () => { ran.push('a'); time.pause() })
-    time.after(10, note('b'))
+  it('honours suspend called from inside a callback before the next due timer runs', () => {
+    const { at, ran, controller, clock, note } = made()
+    clock.after(10, () => { ran.push('a'); controller.suspend() })
+    clock.after(10, note('b'))
     at.wake()
     expect(ran).toEqual(['a'])
     expect(at.turns).toBe(0)
     expect(at.timers).toEqual([])
     at.mono = 500
-    time.resume()
+    controller.resume()
     at.settle()
     expect(ran).toEqual(['a', 'b'])
   })
 
   it('honours close called from inside a callback and drops remaining due timers', () => {
-    const { at, ran, time, note } = made()
-    time.after(10, () => { ran.push('a'); time.close() })
-    time.after(10, note('b'))
-    time.after(20, note('c'))
+    const { at, ran, controller, clock, note } = made()
+    clock.after(10, () => { ran.push('a'); controller.close() })
+    clock.after(10, note('b'))
+    clock.after(20, note('c'))
     at.wake()
     at.settle()
     expect(ran).toEqual(['a'])
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
     expect(at.turns).toBe(0)
   })
 
   it('goes on to what waits after something it ran threw, and hands on what was thrown', () => {
-    const { at, ran, time, note } = made()
-    time.after(10, () => { throw new Error('broke') })
-    time.after(10, note('b'))
-    time.after(20, note('c'))
+    const { at, ran, clock, note } = made()
+    clock.after(10, () => { throw new Error('broke') })
+    clock.after(10, note('b'))
+    clock.after(20, note('c'))
     expect(() => { at.wake() }).toThrow('broke')
     at.settle()
     expect(ran).toEqual(['b'])
@@ -331,31 +331,31 @@ describe('what is asked for as something runs', () => {
 
 describe('the time it is', () => {
   it('says the time of day', () => {
-    const { at, time } = made()
-    expect(time.now()).toBe(1_000_000)
+    const { at, clock } = made()
+    expect(clock.now()).toBe(1_000_000)
     at.wall += 250
-    expect(time.now()).toBe(1_000_250)
+    expect(clock.now()).toBe(1_000_250)
   })
 
   it('never says a time earlier than it said, where the time of day is set back, and ignores non-finite values', () => {
-    const { at, time } = made()
+    const { at, clock } = made()
     at.wall = 5_000
-    expect(time.now()).toBe(5_000)
+    expect(clock.now()).toBe(5_000)
     at.wall = 3_000
-    expect(time.now()).toBe(5_000)
+    expect(clock.now()).toBe(5_000)
     at.wall = Number.NaN
-    expect(time.now()).toBe(5_000)
+    expect(clock.now()).toBe(5_000)
     at.wall = Number.POSITIVE_INFINITY
-    expect(time.now()).toBe(5_000)
+    expect(clock.now()).toBe(5_000)
     at.wall = 5_001
-    expect(time.now()).toBe(5_001)
+    expect(clock.now()).toBe(5_001)
   })
 
   it('moves nothing that waits when the time of day is set', () => {
-    const { at, ran, time, note } = made()
-    time.after(100, note('a'))
+    const { at, ran, clock, note } = made()
+    clock.after(100, note('a'))
     at.wall += 3_600_000
-    time.now()
+    clock.now()
     expect(at.timers.map((timer) => timer.at)).toEqual([100])
     at.wall -= 7_200_000
     at.wake()
@@ -363,130 +363,134 @@ describe('the time it is', () => {
   })
 })
 
-describe('stopping the count', () => {
-  it('runs nothing while stopped, and counts nothing that passed until it goes on', () => {
-    const { at, ran, time, note } = made()
-    time.after(100, note('a'))
+describe('suspending the count', () => {
+  it('runs nothing while suspended, and counts nothing that passed until it resumes', () => {
+    const { at, ran, controller, clock, note } = made()
+    clock.after(100, note('a'))
     at.mono = 40
-    time.pause()
+    controller.suspend()
     expect(at.timers).toEqual([])
     at.mono = 3_600_040
-    time.resume()
+    controller.resume()
     // Sixty are left of its hundred.
     expect(at.timers.map((timer) => timer.ms)).toEqual([60])
     at.wake()
     expect(ran).toEqual(['a'])
   })
 
-  it('counts what is asked for while stopped from when it goes on', () => {
-    const { at, ran, time, note } = made()
-    time.pause()
+  it('counts what is asked for while suspended from when it resumes', () => {
+    const { at, ran, controller, clock, note } = made()
+    controller.suspend()
     at.mono = 500
-    time.after(100, note('a'))
+    clock.after(100, note('a'))
     expect(at.timers).toEqual([])
     at.mono = 9_000
-    time.resume()
+    controller.resume()
     expect(at.timers.map((timer) => timer.at)).toEqual([9_100])
     at.wake()
     expect(ran).toEqual(['a'])
   })
 
-  it('does not run what was waiting for its turn when it stopped, until it goes on', () => {
-    const { at, ran, time, note } = made()
-    time.after(0, note('a'))
-    time.pause()
+  it('does not run what was waiting for its turn when it suspended, until it resumes', () => {
+    const { at, ran, controller, clock, note } = made()
+    clock.after(0, note('a'))
+    controller.suspend()
     at.settle()
     expect(ran).toEqual([])
-    time.resume()
+    controller.resume()
     at.settle()
     expect(ran).toEqual(['a'])
   })
 
-  it('does nothing stopped twice or gone on with twice', () => {
-    const { at, ran, time, note } = made()
-    time.after(100, note('a'))
-    time.resume()
+  it('does nothing suspended twice or resumed twice', () => {
+    const { at, ran, controller, clock, note } = made()
+    clock.after(100, note('a'))
+    controller.resume()
     expect(at.set).toEqual([100])
     at.mono = 10
-    time.pause()
+    controller.suspend()
     at.mono = 20
-    time.pause()
+    controller.suspend()
     at.mono = 50
-    time.resume()
-    time.resume()
-    // Forty passed while it was stopped, counted from the first stop.
+    controller.resume()
+    controller.resume()
+    // Forty passed while it was suspended, counted from the first suspend.
     expect(at.timers.map((timer) => timer.at)).toEqual([140])
     at.wake()
     expect(ran).toEqual(['a'])
   })
 
   it('preserves heap order when resuming collapses sub-ULP deadlines to equal floats', () => {
-    const { at, ran, time, note } = made()
+    const { at, ran, controller, clock, note } = made()
     // Builds a 5-node heap with e0 (seq 0) at index 3 under e1 (index 1) and e4 (index 0).
-    time.after(2e-10, note('e0'))
-    time.after(1e-10, note('e1'))
-    time.after(3e-10, note('e2'))
-    time.after(1.5e-10, note('e3'))
-    time.after(0, note('e4'))
-    time.pause()
+    clock.after(2e-10, note('e0'))
+    clock.after(1e-10, note('e1'))
+    clock.after(3e-10, note('e2'))
+    clock.after(1.5e-10, note('e3'))
+    clock.after(0, note('e4'))
+    controller.suspend()
     at.mono = 1e7
-    time.resume()
+    controller.resume()
     // All five deadlines collapse to 1e7; Floyd heapify restores exact FIFO order by seq.
     at.settle()
     expect(ran).toEqual(['e0', 'e1', 'e2', 'e3', 'e4'])
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
   })
 })
 
-describe('closing and capability view', () => {
-  it('clears pending work and timers on close, throws ClockClosedError from after(), ignores pause/resume/turns, and is idempotent', () => {
-    const { at, ran, time, note } = made()
-    const offA = time.after(10, note('a'))
-    time.after(0, note('zero'))
-    time.pause()
-    time.close()
-    time.close()
-    expect(time.pending()).toBe(0)
+describe('closing and controller separation', () => {
+  it('clears pending work and timers on close, throws ClockClosedError from after(), ignores suspend/resume/turns, and is idempotent', () => {
+    const { at, ran, controller, clock, note } = made()
+    const offA = clock.after(10, note('a'))
+    clock.after(0, note('zero'))
+    controller.suspend()
+    controller.close()
+    controller.close()
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
-    // Calling an old cancel handle or pausing/resuming after close are no-ops; scheduling throws ClockClosedError.
+    // Calling an old cancel handle or suspending/resuming after close are no-ops; scheduling throws ClockClosedError.
     offA()
-    expect(() => time.after(5, note('late'))).toThrow(ClockClosedError)
-    expect(time.pending()).toBe(0)
+    expect(() => clock.after(5, note('late'))).toThrow(ClockClosedError)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
-    time.pause()
-    time.resume()
+    controller.suspend()
+    controller.resume()
     at.settle()
     expect(ran).toEqual([])
-    expect(time.pending()).toBe(0)
+    expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
   })
 
   it('rejects pending and later sleeps with ClockClosedError on close and removes their abort listeners', async () => {
-    const { at, time } = made()
-    const controller = new AbortController()
-    const remove = vi.spyOn(controller.signal, 'removeEventListener')
-    const waiting = time.sleep(100, { signal: controller.signal })
-    time.close()
+    const { at, controller, clock } = made()
+    const abort = new AbortController()
+    const remove = vi.spyOn(abort.signal, 'removeEventListener')
+    const waiting = clock.sleep(100, { signal: abort.signal })
+    controller.close()
     await expect(waiting).rejects.toSatisfy((error: unknown) =>
       error instanceof ClockClosedError && error.name === 'ClockClosedError' && error.message === 'The clock is closed; nothing new may be asked of it',
     )
     expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
-    await expect(time.sleep(10)).rejects.toBeInstanceOf(ClockClosedError)
+    await expect(clock.sleep(10)).rejects.toBeInstanceOf(ClockClosedError)
     expect(at.timers).toEqual([])
   })
 
-  it('hands out a frozen runtime Clock capability view without host lifecycle controls', async () => {
-    const { at, ran, time, note } = made()
-    const managed: ManagedClock = time
-    const view: Clock = managed.view()
-    expect(managed.view()).toBe(view)
-    expect(Object.isFrozen(view)).toBe(true)
-    expect(Object.keys(view).sort()).toEqual(['after', 'now', 'sleep'])
-    expect('close' in view).toBe(false)
-    expect('pause' in view).toBe(false)
-    expect('resume' in view).toBe(false)
-    expect('pending' in view).toBe(false)
-    expect('view' in view).toBe(false)
+  it('separates ClockController from Clock both at compile time and at runtime', async () => {
+    const { at, ran, controller, note } = made()
+    const host: ClockController = controller
+    const consumer: Clock = host.clock
+    // Controller methods are bound so they can be passed directly as event listeners (e.g. powerMonitor.on).
+    const { suspend, resume, close, waiting } = host
+    expect(waiting()).toBe(0)
+    suspend()
+    resume()
+    expect(Object.isFrozen(consumer)).toBe(true)
+    expect(Object.keys(consumer).sort()).toEqual(['after', 'now', 'sleep'])
+    expect('close' in consumer).toBe(false)
+    expect('suspend' in consumer).toBe(false)
+    expect('resume' in consumer).toBe(false)
+    expect('waiting' in consumer).toBe(false)
+    expect('clock' in consumer).toBe(false)
     // A minimal consumer Clock fake requires no lifecycle methods.
     const fake: Clock = {
       now: () => 0,
@@ -494,61 +498,63 @@ describe('closing and capability view', () => {
       sleep: async () => {},
     }
     expect(fake.now()).toBe(0)
-    // The capability view delegates to the same underlying clock.
-    expect(view.now()).toBe(1_000_000)
-    view.after(10, note('via-view'))
-    const nap = view.sleep(20)
+    // A ClockController cannot be passed where a Clock is expected.
+    // @ts-expect-error ClockController is not a Clock; pass controller.clock instead.
+    const leaked: Clock = host
+    void leaked
+    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
+    void consumer.close
+    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
+    void consumer.suspend
+    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
+    void consumer.resume
+    // @ts-expect-error Consumer Clock does not expose host inspection controls.
+    void consumer.waiting
+    expect(consumer.now()).toBe(1_000_000)
+    consumer.after(10, note('via-clock'))
+    const nap = consumer.sleep(20)
     at.wake()
-    expect(ran).toEqual(['via-view'])
+    expect(ran).toEqual(['via-clock'])
     at.wake()
     await nap
-    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
-    void view.close
-    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
-    void view.pause
-    // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
-    void view.resume
-    // @ts-expect-error Consumer Clock does not expose host inspection controls.
-    void view.pending
-    // @ts-expect-error Consumer Clock does not expose view().
-    void view.view
-    managed.close()
-    expect(() => view.after(1, note('after-close'))).toThrow(ClockClosedError)
-    await expect(view.sleep(1)).rejects.toBeInstanceOf(ClockClosedError)
+    close()
+    expect(() => consumer.after(1, note('after-close'))).toThrow(ClockClosedError)
+    await expect(consumer.sleep(1)).rejects.toBeInstanceOf(ClockClosedError)
   })
 })
 
 describe('on the real time and timers', () => {
   it('runs what is due, in order, each in a turn of its own, and not what was called off', async () => {
-    const time = clock()
+    const controller = new ClockController()
+    const { clock } = controller
     try {
       const ran: string[] = []
       let turnsOver = 0
-      time.after(15, () => { ran.push('second') })
-      time.after(5, () => { ran.push('first') })
-      time.after(0, () => { ran.push('at once'); void Promise.resolve().then(() => { turnsOver++ }) })
-      time.after(0, () => { ran.push(`after ${turnsOver}`) })
-      time.after(10, () => { ran.push('never') })()
-      const before = time.now()
-      await time.sleep(40)
+      clock.after(15, () => { ran.push('second') })
+      clock.after(5, () => { ran.push('first') })
+      clock.after(0, () => { ran.push('at once'); void Promise.resolve().then(() => { turnsOver++ }) })
+      clock.after(0, () => { ran.push(`after ${turnsOver}`) })
+      clock.after(10, () => { ran.push('never') })()
+      const before = clock.now()
+      await clock.sleep(40)
       expect(ran).toEqual(['at once', 'after 1', 'first', 'second'])
-      expect(time.now()).toBeGreaterThanOrEqual(before)
-      expect(Math.abs(time.now() - Date.now())).toBeLessThan(5_000)
+      expect(clock.now()).toBeGreaterThanOrEqual(before)
+      expect(Math.abs(clock.now() - Date.now())).toBeLessThan(5_000)
     } finally {
-      time.close()
+      controller.close()
     }
   })
 
   it('leaves no timer set once what it was for is called off or the clock is closed', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const time = clock()
-    const off = time.after(60_000, () => {})
+    const controller = new ClockController()
+    const off = controller.clock.after(60_000, () => {})
     expect(vi.getTimerCount()).toBe(1)
     off()
     expect(vi.getTimerCount()).toBe(0)
-    time.after(60_000, () => {})
+    controller.clock.after(60_000, () => {})
     expect(vi.getTimerCount()).toBe(1)
-    time.close()
+    controller.close()
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -559,41 +565,42 @@ describe('on the real time and timers', () => {
     let cleared = 0
     vi.stubGlobal('setImmediate', (run: () => void) => { asked++; return realSet(run) })
     vi.stubGlobal('clearImmediate', (handle: ReturnType<typeof setImmediate>) => { cleared++; return realClear(handle) })
-    const time = clock()
+    const controller = new ClockController()
     try {
-      await time.sleep(0)
+      await controller.clock.sleep(0)
       expect(asked).toBe(1)
       expect(cleared).toBe(0)
       // A pending immediate queued when close() runs is cleared immediately.
-      time.after(0, () => {})
-      time.close()
+      controller.clock.after(0, () => {})
+      controller.close()
       expect(cleared).toBe(1)
       // Closing again does not double-clear.
-      time.close()
+      controller.close()
       expect(cleared).toBe(1)
     } finally {
-      time.close()
+      controller.close()
     }
   })
 
   it.skipIf(typeof setImmediate === 'function')('runs unstubbed in a real browser window via MessageChannel, performance.now(), setTimeout, and AbortSignal', async () => {
     expect(typeof setImmediate).toBe('undefined')
-    const time = clock()
+    const controller = new ClockController()
+    const { clock } = controller
     try {
       const ran: string[] = []
       let microtasks = 0
-      time.after(0, () => { ran.push('zero-1'); void Promise.resolve().then(() => { microtasks++ }) })
-      time.after(0, () => { ran.push(`zero-2 after ${microtasks}`) })
-      time.after(15, () => { ran.push('delayed') })
-      const controller = new AbortController()
-      const aborted = time.sleep(5_000, { signal: controller.signal })
-      controller.abort(new Error('browser-abort'))
+      clock.after(0, () => { ran.push('zero-1'); void Promise.resolve().then(() => { microtasks++ }) })
+      clock.after(0, () => { ran.push(`zero-2 after ${microtasks}`) })
+      clock.after(15, () => { ran.push('delayed') })
+      const abort = new AbortController()
+      const aborted = clock.sleep(5_000, { signal: abort.signal })
+      abort.abort(new Error('browser-abort'))
       await expect(aborted).rejects.toThrow('browser-abort')
-      await time.sleep(35)
+      await clock.sleep(35)
       expect(ran).toEqual(['zero-1', 'zero-2 after 1', 'delayed'])
-      expect(time.pending()).toBe(0)
+      expect(controller.waiting()).toBe(0)
     } finally {
-      time.close()
+      controller.close()
     }
   })
 
@@ -627,30 +634,30 @@ describe('on the real time and timers', () => {
         lastPort1 = wrapped
       }
     })
-    const time = clock()
+    const controller = new ClockController()
     const ran: string[] = []
     let turnsOver = 0
-    time.after(0, () => { ran.push('a'); void Promise.resolve().then(() => { turnsOver++ }) })
-    time.after(0, () => { ran.push(`b after ${turnsOver}`) })
-    time.after(0, () => { ran.push('c') })
-    await time.sleep(20)
+    controller.clock.after(0, () => { ran.push('a'); void Promise.resolve().then(() => { turnsOver++ }) })
+    controller.clock.after(0, () => { ran.push(`b after ${turnsOver}`) })
+    controller.clock.after(0, () => { ran.push('c') })
+    await controller.clock.sleep(20)
     expect(ran).toEqual(['a', 'b after 1', 'c'])
     expect(created).toBe(1)
     expect(unrefCalled).toBe(1)
-    time.close()
+    controller.close()
     expect(lastPort1?.onmessage).toBeNull()
     expect(port1Closed).toBe(1)
     expect(port2Closed).toBe(1)
     // Closing twice does not double-close ports; closing an unused clock creates no channel.
-    time.close()
+    controller.close()
     expect(port1Closed).toBe(1)
-    const unused = clock()
+    const unused = new ClockController()
     unused.close()
     expect(created).toBe(1)
     // Browser MessagePort lacks unref(): the channel still works cleanly without it.
     includeUnref = false
-    const browserLike = clock()
-    await browserLike.sleep(0)
+    const browserLike = new ClockController()
+    await browserLike.clock.sleep(0)
     browserLike.close()
     expect(created).toBe(2)
     expect(unrefCalled).toBe(1)

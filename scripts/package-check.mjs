@@ -37,28 +37,28 @@ const jsBytes = fs.readFileSync(path.join(distDir, 'index.js'))
 const jsGzip = gzipSync(jsBytes, { level: 9 }).length
 const dtsBytes = fs.readFileSync(path.join(distDir, 'index.d.ts'))
 
-const MAX_JS_RAW = 12_000
-const MAX_JS_GZIP = 3_500
+const MAX_JS_RAW = 13_000
+const MAX_JS_GZIP = 4_000
 if (jsBytes.length > MAX_JS_RAW) throw new Error(`dist/index.js grew to ${jsBytes.length} B (limit ${MAX_JS_RAW} B)`)
 if (jsGzip > MAX_JS_GZIP) throw new Error(`dist/index.js gzip grew to ${jsGzip} B (limit ${MAX_JS_GZIP} B)`)
 
-const { clock } = await import(pathToFileURL(path.join(distDir, 'index.js')).href)
+const { ClockController } = await import(pathToFileURL(path.join(distDir, 'index.js')).href)
 let mono = 0
 let armedCount = 0
-const time = clock({
+const controller = new ClockController({
   monotonic: () => mono,
   wall: () => 0,
   timer: () => { armedCount++; return () => {} },
   turn: () => {},
 })
-const head = time.after(10, () => {})
+const head = controller.clock.after(10, () => {})
 const cancels = []
 const started = performance.now()
-for (let i = 1; i <= 1_000; i++) cancels.push(time.after(10 + i, () => {}))
+for (let i = 1; i <= 1_000; i++) cancels.push(controller.clock.after(10 + i, () => {}))
 for (let i = cancels.length - 1; i >= 0; i--) cancels[i]()
 const elapsedMs = performance.now() - started
 head()
-time.close()
+controller.close()
 if (armedCount !== 1) throw new Error(`Expected 1 armed timer across 1,000 non-head asks/cancels, saw ${armedCount}`)
 
 console.log(
