@@ -173,6 +173,7 @@ describe('what runs, and when', () => {
     const already = new AbortController()
     const reason = new Error('stopped already')
     already.abort(reason)
+    await expect(time.sleep(Number.NaN, { signal: already.signal })).rejects.toThrow(RangeError)
     const addSpy = vi.spyOn(already.signal, 'addEventListener')
     await expect(time.sleep(50, { signal: already.signal })).rejects.toBe(reason)
     expect(addSpy).not.toHaveBeenCalled()
@@ -418,10 +419,27 @@ describe('stopping the count', () => {
     at.wake()
     expect(ran).toEqual(['a'])
   })
+
+  it('preserves heap order when resuming collapses sub-ULP deadlines to equal floats', () => {
+    const { at, ran, time, note } = made()
+    // Builds a 5-node heap with e0 (seq 0) at index 3 under e1 (index 1) and e4 (index 0).
+    time.after(2e-10, note('e0'))
+    time.after(1e-10, note('e1'))
+    time.after(3e-10, note('e2'))
+    time.after(1.5e-10, note('e3'))
+    time.after(0, note('e4'))
+    time.pause()
+    at.mono = 1e7
+    time.resume()
+    // All five deadlines collapse to 1e7; Floyd heapify restores exact FIFO order by seq.
+    at.settle()
+    expect(ran).toEqual(['e0', 'e1', 'e2', 'e3', 'e4'])
+    expect(time.pending()).toBe(0)
+  })
 })
 
-describe('closing and disposal', () => {
-  it('clears pending work and timers on close, ignores later asks/pause/resume/turns, and is idempotent', () => {
+describe('closing and capability view', () => {
+  it('clears pending work and timers on close, throws ClockClosedError from after(), ignores pause/resume/turns, and is idempotent', () => {
     const { at, ran, time, note } = made()
     const offA = time.after(10, note('a'))
     time.after(0, note('zero'))
@@ -430,12 +448,11 @@ describe('closing and disposal', () => {
     time.close()
     expect(time.pending()).toBe(0)
     expect(at.timers).toEqual([])
-    // Calling an old cancel handle, asking for more work, or pausing/resuming after close are all no-ops.
+    // Calling an old cancel handle or pausing/resuming after close are no-ops; scheduling throws ClockClosedError.
     offA()
-    const offLate = time.after(5, note('late'))
+    expect(() => time.after(5, note('late'))).toThrow(ClockClosedError)
     expect(time.pending()).toBe(0)
     expect(at.timers).toEqual([])
-    offLate()
     time.pause()
     time.resume()
     at.settle()
@@ -458,60 +475,68 @@ describe('closing and disposal', () => {
     expect(at.timers).toEqual([])
   })
 
-  it('separates consumer Clock capability from ManagedClock lifecycle', () => {
-    const managed: ManagedClock = clock(world().sources)
-    const consumer: Clock = managed
-    // A minimal consumer Clock fake requires no Disposable or lifecycle methods.
+  it('hands out a frozen runtime Clock capability view without host lifecycle controls', async () => {
+    const { at, ran, time, note } = made()
+    const managed: ManagedClock = time
+    const view: Clock = managed.view()
+    expect(managed.view()).toBe(view)
+    expect(Object.isFrozen(view)).toBe(true)
+    expect(Object.keys(view).sort()).toEqual(['after', 'now', 'sleep'])
+    expect('close' in view).toBe(false)
+    expect('pause' in view).toBe(false)
+    expect('resume' in view).toBe(false)
+    expect('pending' in view).toBe(false)
+    expect('view' in view).toBe(false)
+    // A minimal consumer Clock fake requires no lifecycle methods.
     const fake: Clock = {
       now: () => 0,
       after: () => () => {},
       sleep: async () => {},
     }
     expect(fake.now()).toBe(0)
-    expect(typeof consumer.now).toBe('function')
-    expect(typeof consumer.after).toBe('function')
-    expect(typeof consumer.sleep).toBe('function')
+    // The capability view delegates to the same underlying clock.
+    expect(view.now()).toBe(1_000_000)
+    view.after(10, note('via-view'))
+    const nap = view.sleep(20)
+    at.wake()
+    expect(ran).toEqual(['via-view'])
+    at.wake()
+    await nap
     // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
-    void consumer.close
+    void view.close
     // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
-    void consumer.pause
+    void view.pause
     // @ts-expect-error Consumer Clock does not expose host lifecycle controls.
-    void consumer.resume
+    void view.resume
     // @ts-expect-error Consumer Clock does not expose host inspection controls.
-    void consumer.pending
-    // @ts-expect-error Consumer Clock does not extend Disposable.
-    void consumer[Symbol.dispose]
+    void view.pending
+    // @ts-expect-error Consumer Clock does not expose view().
+    void view.view
     managed.close()
-  })
-
-  it('disposes via Symbol.dispose (`using`)', () => {
-    const at = world()
-    const ran: string[] = []
-    {
-      using time = clock(at.sources)
-      time.after(50, () => { ran.push('never') })
-      expect(at.timers).toHaveLength(1)
-    }
-    expect(at.timers).toEqual([])
-    expect(ran).toEqual([])
+    expect(() => view.after(1, note('after-close'))).toThrow(ClockClosedError)
+    await expect(view.sleep(1)).rejects.toBeInstanceOf(ClockClosedError)
   })
 })
 
 describe('on the real time and timers', () => {
   it('runs what is due, in order, each in a turn of its own, and not what was called off', async () => {
-    using time = clock()
-    const ran: string[] = []
-    let turnsOver = 0
-    time.after(15, () => { ran.push('second') })
-    time.after(5, () => { ran.push('first') })
-    time.after(0, () => { ran.push('at once'); void Promise.resolve().then(() => { turnsOver++ }) })
-    time.after(0, () => { ran.push(`after ${turnsOver}`) })
-    time.after(10, () => { ran.push('never') })()
-    const before = time.now()
-    await time.sleep(40)
-    expect(ran).toEqual(['at once', 'after 1', 'first', 'second'])
-    expect(time.now()).toBeGreaterThanOrEqual(before)
-    expect(Math.abs(time.now() - Date.now())).toBeLessThan(5_000)
+    const time = clock()
+    try {
+      const ran: string[] = []
+      let turnsOver = 0
+      time.after(15, () => { ran.push('second') })
+      time.after(5, () => { ran.push('first') })
+      time.after(0, () => { ran.push('at once'); void Promise.resolve().then(() => { turnsOver++ }) })
+      time.after(0, () => { ran.push(`after ${turnsOver}`) })
+      time.after(10, () => { ran.push('never') })()
+      const before = time.now()
+      await time.sleep(40)
+      expect(ran).toEqual(['at once', 'after 1', 'first', 'second'])
+      expect(time.now()).toBeGreaterThanOrEqual(before)
+      expect(Math.abs(time.now() - Date.now())).toBeLessThan(5_000)
+    } finally {
+      time.close()
+    }
   })
 
   it('leaves no timer set once what it was for is called off or the clock is closed', () => {
@@ -534,56 +559,72 @@ describe('on the real time and timers', () => {
     let cleared = 0
     vi.stubGlobal('setImmediate', (run: () => void) => { asked++; return realSet(run) })
     vi.stubGlobal('clearImmediate', (handle: ReturnType<typeof setImmediate>) => { cleared++; return realClear(handle) })
-    using time = clock()
-    await time.sleep(0)
-    expect(asked).toBe(1)
-    expect(cleared).toBe(0)
-    // A pending immediate queued when close() runs is cleared immediately.
-    time.after(0, () => {})
-    time.close()
-    expect(cleared).toBe(1)
-    // Closing again does not double-clear.
-    time.close()
-    expect(cleared).toBe(1)
+    const time = clock()
+    try {
+      await time.sleep(0)
+      expect(asked).toBe(1)
+      expect(cleared).toBe(0)
+      // A pending immediate queued when close() runs is cleared immediately.
+      time.after(0, () => {})
+      time.close()
+      expect(cleared).toBe(1)
+      // Closing again does not double-clear.
+      time.close()
+      expect(cleared).toBe(1)
+    } finally {
+      time.close()
+    }
   })
 
   it.skipIf(typeof setImmediate === 'function')('runs unstubbed in a real browser window via MessageChannel, performance.now(), setTimeout, and AbortSignal', async () => {
     expect(typeof setImmediate).toBe('undefined')
-    using time = clock()
-    const ran: string[] = []
-    let microtasks = 0
-    time.after(0, () => { ran.push('zero-1'); void Promise.resolve().then(() => { microtasks++ }) })
-    time.after(0, () => { ran.push(`zero-2 after ${microtasks}`) })
-    time.after(15, () => { ran.push('delayed') })
-    const controller = new AbortController()
-    const aborted = time.sleep(5_000, { signal: controller.signal })
-    controller.abort(new Error('browser-abort'))
-    await expect(aborted).rejects.toThrow('browser-abort')
-    await time.sleep(35)
-    expect(ran).toEqual(['zero-1', 'zero-2 after 1', 'delayed'])
-    expect(time.pending()).toBe(0)
+    const time = clock()
+    try {
+      const ran: string[] = []
+      let microtasks = 0
+      time.after(0, () => { ran.push('zero-1'); void Promise.resolve().then(() => { microtasks++ }) })
+      time.after(0, () => { ran.push(`zero-2 after ${microtasks}`) })
+      time.after(15, () => { ran.push('delayed') })
+      const controller = new AbortController()
+      const aborted = time.sleep(5_000, { signal: controller.signal })
+      controller.abort(new Error('browser-abort'))
+      await expect(aborted).rejects.toThrow('browser-abort')
+      await time.sleep(35)
+      expect(ran).toEqual(['zero-1', 'zero-2 after 1', 'delayed'])
+      expect(time.pending()).toBe(0)
+    } finally {
+      time.close()
+    }
   })
 
-  it('takes its turns from a message channel where there is no setImmediate, reuses it, and closes it on close()', async () => {
+  it('takes its turns from a message channel where there is no setImmediate, unrefs if available, reuses it, and closes it on close()', async () => {
     vi.stubGlobal('setImmediate', undefined)
     const RealMessageChannel = MessageChannel
     let created = 0
     let port1Closed = 0
     let port2Closed = 0
+    let unrefCalled = 0
+    let includeUnref = true
     let lastPort1: { onmessage: unknown } | undefined
     vi.stubGlobal('MessageChannel', class {
-      port1: InstanceType<typeof RealMessageChannel>['port1']
+      port1: { onmessage: (() => void) | null; close: () => void; unref?: () => void }
       port2: InstanceType<typeof RealMessageChannel>['port2']
       constructor() {
         created++
         const real = new RealMessageChannel()
+        const realPort1 = real.port1 as unknown as { onmessage: (() => void) | null; close: () => void; unref?: () => void }
         const close1 = real.port1.close.bind(real.port1)
         const close2 = real.port2.close.bind(real.port2)
-        real.port1.close = () => { port1Closed++; close1() }
         real.port2.close = () => { port2Closed++; close2() }
-        this.port1 = real.port1
+        const wrapped: { onmessage: (() => void) | null; close: () => void; unref?: () => void } = {
+          get onmessage() { return realPort1.onmessage },
+          set onmessage(fn) { realPort1.onmessage = fn },
+          close: () => { port1Closed++; close1() },
+        }
+        if (includeUnref) wrapped.unref = () => { unrefCalled++; realPort1.unref?.() }
+        this.port1 = wrapped
         this.port2 = real.port2
-        lastPort1 = real.port1 as unknown as { onmessage: unknown }
+        lastPort1 = wrapped
       }
     })
     const time = clock()
@@ -595,6 +636,7 @@ describe('on the real time and timers', () => {
     await time.sleep(20)
     expect(ran).toEqual(['a', 'b after 1', 'c'])
     expect(created).toBe(1)
+    expect(unrefCalled).toBe(1)
     time.close()
     expect(lastPort1?.onmessage).toBeNull()
     expect(port1Closed).toBe(1)
@@ -605,6 +647,13 @@ describe('on the real time and timers', () => {
     const unused = clock()
     unused.close()
     expect(created).toBe(1)
+    // Browser MessagePort lacks unref(): the channel still works cleanly without it.
+    includeUnref = false
+    const browserLike = clock()
+    await browserLike.sleep(0)
+    browserLike.close()
+    expect(created).toBe(2)
+    expect(unrefCalled).toBe(1)
   })
 })
 

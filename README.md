@@ -6,15 +6,19 @@ time it is.
 ```ts
 import { clock } from '@apackdev/clock'
 
-using time = clock()
-const ran: string[] = []
-time.after(20, () => { ran.push('second') })
-time.after(10, () => { ran.push('first') })
-// What `after` returns calls it off.
-time.after(15, () => { ran.push('never') })()
-await time.sleep(40)
+const time = clock()
+try {
+  const ran: string[] = []
+  time.after(20, () => { ran.push('second') })
+  time.after(10, () => { ran.push('first') })
+  // What `after` returns calls it off.
+  time.after(15, () => { ran.push('never') })()
+  await time.sleep(40)
 
-console.log(ran.join(', '))
+  console.log(ran.join(', '))
+} finally {
+  time.close()
+}
 ```
 
 ```text
@@ -24,16 +28,17 @@ first, second
 ## What a clock is
 
 Consumers take a `Clock` (read time and wait, without authority to pause or close the host's clock); whoever owns
-the clock holds the `ManagedClock` returned by `clock()`.
+the clock holds the `ManagedClock` returned by `clock()` and can hand out a runtime-restricted `Clock` with `view()`.
 
 | | |
 |---|---|
-| `after(ms, run)` | Runs `run` once, when `ms` have passed, unless what it returns is called first |
+| `after(ms, run)` | Runs `run` once, when `ms` have passed, unless what it returns is called first; throws `RangeError` for non-finite `ms` and `ClockClosedError` once closed |
 | `sleep(ms, { signal })` | Resolves when `ms` have passed; rejects with `signal.reason` on abort, `ClockClosedError` on close, or `RangeError` for non-finite `ms` |
 | `now()` | The time it is, in milliseconds since 1970 |
+| `view()` | *(ManagedClock)* Returns a frozen `Clock` exposing only `now`, `after`, and `sleep` |
 | `pending()` | *(ManagedClock)* How many things are currently waiting to run |
 | `pause()` / `resume()` | *(ManagedClock)* Stops and starts the count: what passes between is counted against nothing that waits |
-| `close()` / `[Symbol.dispose]()` | *(ManagedClock)* Calls off everything waiting, clears the underlying timer, rejects pending sleeps with `ClockClosedError`, and runs nothing after |
+| `close()` | *(ManagedClock)* Calls off everything waiting, clears the underlying timer, rejects pending sleeps with `ClockClosedError`, and rejects later `after`/`sleep` calls |
 
 `clock()` reads the real time and sets real timers. `clock({ monotonic, wall, timer, turn })` takes any of the four
 from whoever makes it (`Sources`), which is how its own specs choose when each thing happens.

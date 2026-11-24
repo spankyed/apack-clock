@@ -6,8 +6,8 @@ holds; this is what to know before changing it.
 ## Layout
 
 - `src/index.ts` is the whole package: `clock(sources)`, the indexed binary min-heap of what waits in the order it
-  is due, the one timer for the first of it, `pending()`/`close()`/`[Symbol.dispose]()`, and the real sources it
-  reads unless given others.
+  is due, the one timer for the first of it, `view()`/`pending()`/`close()`, and the real sources it reads unless
+  given others.
 - `tests/clock.spec.ts` is each thing the README says holds, as a case. `tests/model.spec.ts` holds a clock to a
   list of things and the moment each is due, under runs drawn from a seed (including re-entrant cancels, pauses,
   throwing callbacks, stale wakeups, fractional jitter, and mid-flight close). `tests/support/world.ts` is the

@@ -3,7 +3,7 @@
 // callbacks, set the time of day, wake the clock on time, late, very late and early (including sub-ms jitter),
 // fire stale cancelled timers, and close the clock — checking every invariant after every step.
 import { describe, expect, it } from 'vitest'
-import { clock, LONGEST } from '../src/index.ts'
+import { clock, ClockClosedError, LONGEST } from '../src/index.ts'
 import { world } from './support/world.ts'
 
 /** Numbers drawn from a seed: the same seed, the same draws. */
@@ -135,11 +135,14 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     if (random.int(3)) while (at.turns) { turn('a turn', () => { at.turn() }); check() }
   }
 
-  // Every 10th run closes mid-flight and verifies nothing fires after close; the rest drain to completion.
+  // Every 10th run closes mid-flight and verifies nothing fires and after() throws ClockClosedError; the rest drain to completion.
   if (seed % 10 === 0) {
     turn('closed', () => { time.close() })
     holds(time.pending() === 0, `pending() after close is ${time.pending()}`)
     holds(at.timers.length === 0, `timers after close: ${at.timers.length}`)
+    let threwClosed = false
+    try { time.after(1, () => {}) } catch (error) { threwClosed = error instanceof ClockClosedError }
+    holds(threwClosed, 'after() on a closed clock did not throw ClockClosedError')
     const ranBefore = things.filter((thing) => thing.state === 'ran').length
     at.settle()
     holds(things.filter((thing) => thing.state === 'ran').length === ranBefore, 'something ran after close')
