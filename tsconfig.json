@@ -3,7 +3,7 @@
     "target": "ES2024",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2024", "ESNext.Disposable"],
+    "lib": ["ES2024"],
     "types": ["node"],
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true,

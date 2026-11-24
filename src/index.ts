@@ -28,7 +28,7 @@ export interface SleepOptions {
   readonly signal?: AbortSignal
 }
 
-/** Rejected with when a clock is closed while a `sleep` is waiting, or when `sleep` is called on a closed clock. */
+/** Thrown by `after` or rejected from `sleep` when the clock is closed. */
 export class ClockClosedError extends Error {
   constructor() {
     super('The clock is closed')
@@ -47,7 +47,7 @@ export interface Clock {
    * Runs `run` once, when `ms` have passed on the clock that only goes forward, unless what it returns is called
    * first. Never before then, and never as it is called: on a turn of its own, alone. Of two due at the same
    * moment, the one set first runs first. Less than nothing is nothing. Throws a `RangeError` for what is not a
-   * finite length of time.
+   * finite length of time, and `ClockClosedError` once the clock is closed.
    */
   after(ms: number, run: () => void): () => void
   /**
@@ -58,7 +58,9 @@ export interface Clock {
 }
 
 /** Host-owned clock handle, adding lifecycle and inspection controls over `Clock`. */
-export interface ManagedClock extends Clock, Disposable {
+export interface ManagedClock extends Clock {
+  /** Returns a frozen consumer `Clock` view exposing only `now`, `after`, and `sleep`. */
+  view(): Clock
   /** How many things are currently waiting to run. */
   pending(): number
   /**
@@ -114,9 +116,7 @@ const makeTurns = (): { readonly turn: Sources['turn']; close(): void } => {
         channel = new MessageChannel()
         // Node's types leave a port's `onmessage` out, and it is what a window and Node both have.
         port1 = channel.port1 as unknown as { onmessage: (() => void) | null; unref?: () => void }
-        // Stryker disable next-line OptionalChaining: guards against an in-flight port message arriving during close.
-        port1.onmessage = () => { asked.shift()?.() }
-        // Stryker disable next-line OptionalChaining: unref exists in Node and not in a browser window.
+        port1.onmessage = () => { asked.shift()!() }
         port1.unref?.()
       }
       asked.push(run)
@@ -251,9 +251,15 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
     if (!Number.isFinite(ms)) throw new RangeError(`A clock is asked for a finite length of time, and was given ${String(ms)}`)
   }
 
+  const now: Clock['now'] = () => {
+    const wall = from.wall()
+    if (Number.isFinite(wall)) said = Math.max(said, wall)
+    return said
+  }
+
   const after: Clock['after'] = (ms, run) => {
     assertFinite(ms)
-    if (closed) return () => {}
+    if (closed) throw new ClockClosedError()
     const entry: Entry = { due: (paused ?? from.monotonic()) + Math.max(0, ms), seq: nextSeq++, run, index: heap.length }
     const wasHead = heap[0]
     push(entry)
@@ -270,7 +276,10 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
     assertFinite(ms)
     const signal = options?.signal
     if (signal?.aborted) { reject(signal.reason); return }
-    if (closed) { reject(new ClockClosedError()); return }
+    const cancel = after(ms, () => {
+      cleanup()
+      resolve()
+    })
 
     const cleanup = (): void => {
       sleepers.delete(onClose)
@@ -288,11 +297,9 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
 
     sleepers.add(onClose)
     signal?.addEventListener('abort', onAbort)
-    const cancel = after(ms, () => {
-      cleanup()
-      resolve()
-    })
   })
+
+  const capability: Clock = Object.freeze({ now, after, sleep })
 
   const close = (): void => {
     closed = true
@@ -305,13 +312,10 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
   }
 
   return {
-    now: () => {
-      const wall = from.wall()
-      if (Number.isFinite(wall)) said = Math.max(said, wall)
-      return said
-    },
+    now,
     after,
     sleep,
+    view: () => capability,
     pending: () => heap.length,
     pause: () => {
       if (closed || paused !== undefined) return
@@ -323,9 +327,10 @@ export function clock(given: Partial<Sources> = {}): ManagedClock {
       const span = from.monotonic() - paused
       paused = undefined
       for (const entry of heap) entry.due += span
+      // IEEE-754 addition can collapse distinct deadlines to the same float, flipping their `seq` tie-break order.
+      for (let index = (heap.length >> 1) - 1; index >= 0; index--) siftDown(index)
       arm()
     },
     close,
-    [Symbol.dispose]: close,
   }
 }
