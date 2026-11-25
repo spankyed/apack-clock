@@ -145,6 +145,9 @@ describe('what runs, and when', () => {
       expect(() => clock.after(not, () => {})).toThrow(RangeError)
     }
     expect(() => clock.after(Number.NaN, () => {})).toThrow(/given NaN/)
+    // Overflowing `monotonic() + ms` to Infinity is also rejected before touching the heap.
+    at.mono = Number.MAX_VALUE
+    expect(() => clock.after(Number.MAX_VALUE, () => {})).toThrow(/overflows the monotonic deadline/)
     expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
     expect(at.turns).toBe(0)

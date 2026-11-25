@@ -192,17 +192,25 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(extreme.waiting()).toBe(0)
     extreme.close()
 
-    // A deadline that overflowed `mono + ms` to Infinity rejects next()/drain() cleanly without corrupting elapsed(),
-    // while finite partial advances that do not reach Infinity still succeed.
+    // Overflowing `mono + ms` fails fast at after()/sleep() time so no non-finite deadline ever enters the heap.
     const overflowed = new TestClock()
     await overflowed.advance(Number.MAX_VALUE)
-    overflowed.clock.after(Number.MAX_VALUE, () => {})
-    await overflowed.advance(10)
-    expect(overflowed.elapsed()).toBe(Number.MAX_VALUE)
-    await expect(overflowed.next()).rejects.toThrow(/non-finite deadline/)
-    await expect(overflowed.drain()).rejects.toThrow(/non-finite deadline/)
-    expect(overflowed.elapsed()).toBe(Number.MAX_VALUE)
+    expect(() => overflowed.clock.after(Number.MAX_VALUE, () => {})).toThrow(RangeError)
+    await expect(overflowed.clock.sleep(Number.MAX_VALUE)).rejects.toThrow(RangeError)
+    expect(overflowed.waiting()).toBe(0)
     overflowed.close()
+
+    // Shifting an existing MAX_VALUE wait across a MAX_VALUE suspend span clamps to finite MAX_VALUE and still fires.
+    const clampedResume = new TestClock()
+    let resumedAt = 0
+    clampedResume.clock.after(Number.MAX_VALUE, () => { resumedAt = clampedResume.elapsed() })
+    clampedResume.suspend()
+    await clampedResume.advance(Number.MAX_VALUE)
+    clampedResume.resume()
+    expect(await clampedResume.next()).toBe(true)
+    expect(resumedAt).toBe(Number.MAX_VALUE)
+    expect(clampedResume.waiting()).toBe(0)
+    clampedResume.close()
   })
 
   it('preserves ClockController wall clamping, elapsed() isolation, suspend/resume, AbortSignal, and close semantics', async () => {

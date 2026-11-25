@@ -290,8 +290,12 @@ export class ClockController {
     const after: Clock['after'] = (ms, run) => {
       assertFinite(ms)
       if (closed) throw new ClockClosedError()
+      const due = (suspended ?? from.monotonic()) + Math.max(0, ms)
+      if (!Number.isFinite(due)) {
+        throw new RangeError(`A clock wait of ${String(ms)} ms overflows the monotonic deadline`)
+      }
       const wasHead = heap[0]
-      const entry = push((suspended ?? from.monotonic()) + Math.max(0, ms), run)
+      const entry = push(due, run)
       if (heap[0] !== wasHead) arm()
       return () => {
         if (heap[entry.index] !== entry) return
@@ -349,7 +353,10 @@ export class ClockController {
       if (suspended === undefined) return
       const span = from.monotonic() - suspended
       suspended = undefined
-      for (const entry of heap) entry.due += span
+      for (const entry of heap) {
+        const shifted = entry.due + span
+        entry.due = Number.isFinite(shifted) ? shifted : Number.MAX_VALUE
+      }
       // Adding `span` can round two distinct `due` times to the same float, reversing their `seq` tie-break order.
       for (let index = (heap.length >> 1) - 1; index >= 0; index--) siftDown(heap, index)
       arm()
