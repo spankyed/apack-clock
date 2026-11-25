@@ -103,6 +103,10 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 | `testClock.setWall(wall)` | Jumps virtual wall time (`number` or `Date`, forward, backward, or non-finite) without moving monotonic time |
 | `testClock.waiting()` / `suspend()` / `resume()` / `close()` | Host lifecycle controls forwarded to the underlying `ClockController` |
 
+Notes on `TestClock` semantics:
+- **Scope of isolation:** `TestClock` controls code wired to `Clock`, not the wider JS environment — unrelated I/O or raw global `setTimeout` callbacks may still run while awaiting the `MessageChannel` microtask barrier.
+- **Exact deadlines:** `TestClock` jumps directly to each entry's exact deadline (including fractional waits and multi-decade durations in `O(1)`), whereas real runtimes wake at OS timer resolution (`>= Math.ceil(left)`).
+
 ### Errors
 
 - **Non-finite `ms` (`NaN`, `±Infinity`):** `after` throws `RangeError`; `sleep` rejects with `RangeError`.

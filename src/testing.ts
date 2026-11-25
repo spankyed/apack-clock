@@ -63,7 +63,7 @@ export class TestClock {
 
     let mono = 0
     let wall = toWall(options.wall ?? 0)
-    let armed: { readonly due: number; readonly run: () => void } | undefined
+    let armed: (() => void) | undefined
     let pendingTurn: (() => void) | undefined
     let stepping = false
     let closed = false
@@ -101,8 +101,8 @@ export class TestClock {
     const controller = new ClockController({
       monotonic: () => mono,
       wall: () => wall,
-      timer: (ms, run) => {
-        armed = { due: mono + ms, run }
+      timer: (_ms, run) => {
+        armed = run
         return () => { armed = undefined }
       },
       turn: (run) => {
@@ -119,11 +119,14 @@ export class TestClock {
         return true
       }
       if (armed) {
-        // `ClockController` rounds sub-ms remainders up with `Math.ceil`; use exact `nextDue()` when earlier so
-        // fractional waits fire at their exact deadline while > MAX_TIMER_MS waits still step through each hop.
-        const wakeAt = Math.min(armed.due, internal.nextDue())
+        // Jump straight to the exact deadline `nextDue()` in O(1): fractional waits fire at their exact deadline,
+        // and extreme durations never stall or spin through intermediate `MAX_TIMER_MS` hops.
+        const wakeAt = internal.nextDue()
         if (wakeAt <= limit) {
-          const { run } = armed
+          if (!Number.isFinite(wakeAt)) {
+            throw new RangeError('TestClock cannot advance to a non-finite deadline')
+          }
+          const run = armed
           armed = undefined
           const delta = wakeAt - mono
           mono = wakeAt
@@ -137,7 +140,7 @@ export class TestClock {
 
     const hasWorkUpTo = (limit: number): boolean =>
       (pendingTurn !== undefined && controller.waiting() > 0) ||
-      (armed !== undefined && Math.min(armed.due, internal.nextDue()) <= limit)
+      (armed !== undefined && internal.nextDue() <= limit)
 
     const guard = async <T>(work: () => Promise<T>): Promise<T> => {
       if (stepping) throw new Error('TestClock is already stepping; await the previous advance, next, or drain call first')
