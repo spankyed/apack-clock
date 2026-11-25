@@ -119,13 +119,10 @@ export class TestClock {
         return true
       }
       if (armed) {
-        // Jump straight to the exact deadline `nextDue()` in O(1): fractional waits fire at their exact deadline,
-        // and extreme durations never stall or spin through intermediate `MAX_TIMER_MS` hops.
+        // Jump straight to the exact finite deadline `nextDue()` in O(1): fractional waits fire at their exact
+        // deadline, and extreme durations never stall or spin through intermediate `MAX_TIMER_MS` hops.
         const wakeAt = internal.nextDue()
         if (wakeAt <= limit) {
-          if (!Number.isFinite(wakeAt)) {
-            throw new RangeError('TestClock cannot advance to a non-finite deadline')
-          }
           const run = armed
           armed = undefined
           const delta = wakeAt - mono
