@@ -90,6 +90,26 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 | `controller.suspend()` / `resume()` | Suspends and resumes counting; time elapsed while suspended is not counted against what waits |
 | `controller.close()` | Calls off everything waiting, clears any timer, rejects pending sleeps, and refuses later asks |
 
+### Low-level deadline queue (`@apackdev/clock/queue`)
+
+`ClockController` builds on `DeadlineQueue<T>`, exported separately at `@apackdev/clock/queue` as a minimal,
+deterministic, cancellable deadline queue (Future Event List) for building real-time schedulers, virtual clocks, and
+discrete-event simulations without inheriting `ClockController`'s timer, turn, or wall-clock policies:
+
+| | |
+|---|---|
+| `new DeadlineQueue<T>()` | Creates an empty indexed min-heap ordered by `(due, priority, seq)` |
+| `queue.push(due, value, priority?)` | Inserts `value` at finite `due` and `priority` (default `0`, lower first) in `O(log n)`; returns a `QueueEntry<T>` handle |
+| `queue.peek()` | Earliest `QueueEntry<T>` without removing it, or `undefined` (`O(1)`) |
+| `queue.has(entry)` | Whether `entry` is currently waiting in this queue (`O(1)`) |
+| `queue.pop()` | Removes and returns the earliest `QueueEntry<T>`, or `undefined` (`O(log n)`) |
+| `queue.popDue(at)` | Removes and returns the earliest entry if `due <= at`, or `undefined` (`O(log n)`) |
+| `queue.remove(entry)` | Removes `entry` in `O(log n)`; returns `true` if present in this queue, `false` otherwise |
+| `queue.reschedule(entry, due, priority?)` | Updates `entry` in place in `O(log n)` (refreshing `seq`), keeping the same handle; returns `true` if present |
+| `queue.shift(delta)` | Atomically shifts every entry's `due` by finite `delta` and re-heapifies in `O(n)` (overflow- and IEEE-754 tie-safe) |
+| `queue.clear()` | Empties the queue in `O(1)`; prior handles remain inert |
+| `queue.size` | Number of entries currently in the queue |
+
 ### Testing driver (`@apackdev/clock/testing`)
 
 | | |

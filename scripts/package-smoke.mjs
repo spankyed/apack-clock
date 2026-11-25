@@ -23,9 +23,11 @@ try {
   run(['install', '--no-audit', '--no-fund', '--no-package-lock', tarball], consumer)
   fs.writeFileSync(path.join(consumer, 'entries.mjs'), `
 import * as clock from '@apackdev/clock'
+import * as queue from '@apackdev/clock/queue'
 import * as testing from '@apackdev/clock/testing'
 for (const name of ['ClockController', 'ClockClosedError']) if (typeof clock[name] !== 'function') throw new Error('@apackdev/clock has no ' + name)
 if (clock.MAX_TIMER_MS !== 0x7fffffff) throw new Error('@apackdev/clock has no MAX_TIMER_MS')
+if (typeof queue.DeadlineQueue !== 'function') throw new Error('@apackdev/clock/queue has no DeadlineQueue')
 if (typeof testing.TestClock !== 'function') throw new Error('@apackdev/clock/testing has no TestClock')
 const tc = new testing.TestClock()
 let woke = false
@@ -45,6 +47,7 @@ import {
   type ClockSleepOptions,
   type ClockSources,
 } from '@apackdev/clock'
+import { DeadlineQueue, type QueueEntry } from '@apackdev/clock/queue'
 import { TestClock, type TestClockOptions } from '@apackdev/clock/testing'
 
 const minimal: Clock = { now: () => 0, after: () => () => {}, sleep: async () => {} }
@@ -58,6 +61,13 @@ void handoff.close
 void handoff.suspend
 const opts: ClockSleepOptions = {}
 const partial: Partial<ClockSources> = {}
+const q = new DeadlineQueue<string>()
+const entry: QueueEntry<string> = q.push(10, 'hello', -1)
+const hasIt: boolean = q.has(entry)
+const moved: boolean = q.reschedule(entry, 5, 0)
+const due: QueueEntry<string> | undefined = q.popDue(5)
+// @ts-expect-error QueueEntry fields must be readonly to consumers.
+entry.due = 20
 const tcOpts: TestClockOptions = { wall: new Date('2026-01-01T00:00:00.000Z'), maxSteps: 100 }
 const tc = new TestClock(tcOpts)
 tc.setWall(new Date('2026-01-02T00:00:00.000Z'))
@@ -70,6 +80,10 @@ void minimal
 void leaked
 void opts
 void partial
+void entry
+void hasIt
+void moved
+void due
 void testHandoff
 void elapsedMs
 void leakedTest

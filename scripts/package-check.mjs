@@ -35,20 +35,22 @@ for (const [name, hash] of first) {
 
 const indexJsBytes = fs.readFileSync(path.join(distDir, 'index.js'))
 const clockJsBytes = fs.readFileSync(path.join(distDir, 'clock.js'))
-const jsRaw = indexJsBytes.length + clockJsBytes.length
-const jsGzip = gzipSync(Buffer.concat([indexJsBytes, clockJsBytes]), { level: 9 }).length
+const queueJsBytes = fs.readFileSync(path.join(distDir, 'queue.js'))
+const jsRaw = indexJsBytes.length + clockJsBytes.length + queueJsBytes.length
+const jsGzip = gzipSync(Buffer.concat([indexJsBytes, clockJsBytes, queueJsBytes]), { level: 9 }).length
 const testingJsBytes = fs.readFileSync(path.join(distDir, 'testing.js'))
 const testingJsGzip = gzipSync(testingJsBytes, { level: 9 }).length
 const dtsBytes = fs.readFileSync(path.join(distDir, 'index.d.ts'))
 const clockDtsBytes = fs.readFileSync(path.join(distDir, 'clock.d.ts'))
+const queueDtsBytes = fs.readFileSync(path.join(distDir, 'queue.d.ts'))
 const testingDtsBytes = fs.readFileSync(path.join(distDir, 'testing.d.ts'))
 
-const MAX_JS_RAW = 13_500
-const MAX_JS_GZIP = 4_000
+const MAX_JS_RAW = 19_000
+const MAX_JS_GZIP = 5_500
 const MAX_TESTING_JS_RAW = 9_000
 const MAX_TESTING_JS_GZIP = 3_000
-if (jsRaw > MAX_JS_RAW) throw new Error(`dist clock JS grew to ${jsRaw} B (limit ${MAX_JS_RAW} B)`)
-if (jsGzip > MAX_JS_GZIP) throw new Error(`dist clock JS gzip grew to ${jsGzip} B (limit ${MAX_JS_GZIP} B)`)
+if (jsRaw > MAX_JS_RAW) throw new Error(`dist clock+queue JS grew to ${jsRaw} B (limit ${MAX_JS_RAW} B)`)
+if (jsGzip > MAX_JS_GZIP) throw new Error(`dist clock+queue JS gzip grew to ${jsGzip} B (limit ${MAX_JS_GZIP} B)`)
 if (testingJsBytes.length > MAX_TESTING_JS_RAW) throw new Error(`dist/testing.js grew to ${testingJsBytes.length} B (limit ${MAX_TESTING_JS_RAW} B)`)
 if (testingJsGzip > MAX_TESTING_JS_GZIP) throw new Error(`dist/testing.js gzip grew to ${testingJsGzip} B (limit ${MAX_TESTING_JS_GZIP} B)`)
 
@@ -73,7 +75,7 @@ if (armedCount !== 1) throw new Error(`Expected 1 armed timer across 1,000 non-h
 
 console.log(
   `reproducible build verified (${first.size} files, sha256=${first.get('clock.js').slice(0, 12)}), ` +
-  `clock=${jsRaw} B (${jsGzip} B gzip), dist/testing.js=${testingJsBytes.length} B (${testingJsGzip} B gzip), ` +
-  `d.ts=${dtsBytes.length + clockDtsBytes.length + testingDtsBytes.length} B, ` +
+  `clock+queue=${jsRaw} B (${jsGzip} B gzip), dist/testing.js=${testingJsBytes.length} B (${testingJsGzip} B gzip), ` +
+  `d.ts=${dtsBytes.length + clockDtsBytes.length + queueDtsBytes.length + testingDtsBytes.length} B, ` +
   `1000 non-head asks+cancels=${elapsedMs.toFixed(2)} ms (1 armed timer)`,
 )

@@ -5,15 +5,19 @@ file holds internal design details, vocabulary, and contributor rules.
 
 ## Layout
 
-- `src/clock.ts` implements `ClockController` (`clock`, `waiting()`, `suspend()`, `resume()`, `close()`), the
-  indexed binary min-heap of what waits (`O(log n)` insert, pop, and remove-on-cancel with no dead entries left
-  behind), the one armed timer for what is due first, and the real sources it reads unless given others. `src/index.ts`
-  re-exports only the public `@apackdev/clock` contract.
+- `src/queue.ts` is the policy-neutral scheduling kernel (`@apackdev/clock/queue`): `DeadlineQueue<T>` (an indexed
+  binary min-heap / Future Event List ordered by `(due, priority, seq)` with `O(log n)`
+  `push`/`pop`/`popDue`/`remove`/`reschedule`, `O(1)` `peek`/`has`/`size`/`clear`, private-symbol slot hiding, and
+  atomic `O(n)` IEEE-754-safe `shift`) and `QueueEntry<T>`.
+- `src/clock.ts` implements `ClockController` (`clock`, `waiting()`, `suspend()`, `resume()`, `close()`) on top of
+  `DeadlineQueue`, plus the one armed timer for what is due first and the real sources it reads unless given others.
+  `src/index.ts` re-exports only the public `@apackdev/clock` contract.
 - `src/testing.ts` is the deterministic testing driver (`@apackdev/clock/testing`): `TestClock`, wrapping
   `ClockController` via `ClockSources` (plus package-internal `clockInternals` for exact sub-ms deadlines and
   hop-transparent `next()` / `maxSteps`) with O(1) driver state, async microtask-flushing `advance()`/`next()`/`drain()`,
   `elapsed()`, `setWall()`, and `maxSteps` runaway protection.
-- `tests/clock.spec.ts` holds each guarantee in the README as a case. `tests/testing.spec.ts` covers `TestClock`
+- `tests/clock.spec.ts` holds each guarantee in the README as a case. `tests/queue.spec.ts` covers `DeadlineQueue`
+  invariants, a 200-seed sorted-array reference model, and a virtual multi-lane scheduler demo. `tests/testing.spec.ts` covers `TestClock`
   stepping, sub-ms accuracy, hop-transparent `next()`, microtask flushing, lifecycle forwarding, `maxSteps`,
   re-entrancy guards, `MessageChannel` ref/unref/close, and 40 randomized traces. `tests/proof.spec.ts` explores every reachable
   state of `ClockController` within finite bounds (up to 3 waits for core scheduling/suspend/resume/wake/cancel/close,
