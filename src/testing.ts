@@ -34,7 +34,7 @@ const toWall = (value: number | Date): number => (typeof value === 'number' ? va
 export class TestClock {
   /** Frozen consumer `Clock` from the underlying `ClockController`. */
   readonly clock: Clock
-  /** Virtual monotonic time elapsed since this `TestClock` was created, in milliseconds (starts at `0`). */
+  /** Total virtual monotonic ms elapsed (starts at `0`; includes suspended time, unlike `clock.monotonic()`). */
   readonly elapsed: () => number
   /** Count of entries currently waiting to run. */
   readonly waiting: () => number
@@ -52,14 +52,13 @@ export class TestClock {
    */
   readonly advance: (ms: number) => Promise<void>
   /**
-   * Runs the next due user callback (advancing virtual monotonic and wall time to its deadline and skipping any
-   * cancelled turns transparently) and flushes microtasks. Returns `true` if a callback ran, or `false` when idle,
-   * suspended, or closed.
+   * Runs the next due callback (advancing virtual monotonic and wall time, skipping cancelled turns) and flushes
+   * microtasks. Returns `false` when idle, suspended, or closed; rejects with `RangeError` past `Number.MAX_VALUE`.
    */
   readonly next: () => Promise<boolean>
   /**
-   * Runs all due callbacks in order until nothing runnable remains, flushing microtasks after each callback.
-   * Throws `RangeError` if dispatched callbacks exceed `maxSteps`.
+   * Runs all due callbacks in order, flushing microtasks after each.
+   * Rejects with `RangeError` if callbacks exceed `maxSteps` or a deadline exceeds `Number.MAX_VALUE`.
    */
   readonly drain: () => Promise<void>
   /** Sets the virtual wall-clock reading (number or `Date`, forward, backward, or non-finite) without moving monotonic time. */

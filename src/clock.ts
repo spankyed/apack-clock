@@ -58,14 +58,15 @@ export interface Clock {
    */
   monotonic(): number
   /**
-   * Runs `run` once when `ms` have passed on `monotonic`, unless what it returns is called first. Never before it is
+   * Runs `run` once when `ms` have passed on `monotonic()`, unless what it returns is called first. Never before it is
    * due, and never inline: on a turn of its own, alone. Of two due at the same moment, the one asked first runs first.
-   * Less than nothing is nothing. Throws `RangeError` for a non-finite `ms`, and `ClockClosedError` once closed.
+   * Less than nothing is nothing. Throws `RangeError` for a non-finite `ms` or overflowing deadline, and
+   * `ClockClosedError` once closed.
    */
   after(ms: number, run: () => void): () => void
   /**
-   * Resolves when `ms` have passed, as `after` runs. Rejects with `RangeError` for a non-finite `ms`, with
-   * `signal.reason` if `options.signal` aborts, or with `ClockClosedError` if the clock is closed.
+   * Resolves when `ms` have passed, as `after` runs. Rejects with `RangeError` for a non-finite `ms` or overflowing
+   * deadline, with `signal.reason` if `options.signal` aborts, or with `ClockClosedError` if the clock is closed.
    */
   sleep(ms: number, options?: ClockSleepOptions): Promise<void>
 }
@@ -213,7 +214,7 @@ export class ClockController {
    * waits. For whoever receives OS power events (`powerMonitor` `suspend` / `resume`) where `monotonic` ticks through sleep.
    */
   readonly suspend: () => void
-  /** Resumes counting from here, shifting what waits by the suspended span. */
+  /** Resumes counting from here; time spent suspended is excluded from what waits and from `monotonic()`. */
   readonly resume: () => void
   /** Closes the clock: calls off everything that waits, disarms any timer, rejects pending sleeps, and refuses later asks. */
   readonly close: () => void
