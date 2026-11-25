@@ -28,6 +28,7 @@ describe('in a dedicated Web Worker', () => {
         abortResult: 'worker-abort',
         closedAfter: true,
         waiting: 0,
+        testClockWoke: 12.5,
       })
     } finally {
       worker.terminate()

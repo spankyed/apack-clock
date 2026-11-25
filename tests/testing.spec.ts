@@ -2,6 +2,17 @@ import { describe, expect, it, vi } from 'vitest'
 import { MAX_TIMER_MS, type Clock } from '../src/index.ts'
 import { TestClock } from '../src/testing.ts'
 
+/** Deterministic Mulberry32 PRNG for seeded randomized traces. */
+const prng = (seed: number): (() => number) => {
+  let state = seed >>> 0
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = Math.imul(state ^ (state >>> 15), 1 | state)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 0x1_0000_0000
+  }
+}
+
 describe('TestClock (@apackdev/clock/testing)', () => {
   it('advances event-by-event across chained async sleeps and deep microtask chains', async () => {
     const testClock = new TestClock({ wall: 1_000 })
@@ -24,11 +35,48 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     await testClock.advance(25)
     await task
     expect(log).toEqual(['start@1000', 'mid@1010', 'end@1025'])
+    expect(testClock.elapsed()).toBe(25)
     expect(testClock.waiting()).toBe(0)
     testClock.close()
   })
 
-  it('supports advance(0) for immediate turns without moving time, and rejects invalid advance durations', async () => {
+  it('fires sub-millisecond waits at their exact deadlines in both advance() and next()', async () => {
+    const testClock = new TestClock({ wall: 100 })
+    const log: Array<{ readonly name: string; readonly elapsed: number; readonly wall: number }> = []
+
+    testClock.clock.after(0.1, () => {
+      log.push({ name: 'a', elapsed: testClock.elapsed(), wall: testClock.clock.now() })
+    })
+    testClock.clock.after(0.2, () => {
+      log.push({ name: 'b', elapsed: testClock.elapsed(), wall: testClock.clock.now() })
+    })
+
+    // Advancing 0.05 ms must NOT fire the 0.1 ms wait.
+    await testClock.advance(0.05)
+    expect(log).toEqual([])
+    expect(testClock.elapsed()).toBeCloseTo(0.05, 10)
+
+    // Advancing another 0.45 ms (to 0.5 ms total) fires BOTH at their exact 0.1 and 0.2 timestamps.
+    await testClock.advance(0.45)
+    expect(log).toHaveLength(2)
+    expect(log[0]!.name).toBe('a')
+    expect(log[0]!.elapsed).toBeCloseTo(0.1, 10)
+    expect(log[0]!.wall).toBeCloseTo(100.1, 10)
+    expect(log[1]!.name).toBe('b')
+    expect(log[1]!.elapsed).toBeCloseTo(0.2, 10)
+    expect(log[1]!.wall).toBeCloseTo(100.2, 10)
+    expect(testClock.elapsed()).toBeCloseTo(0.5, 10)
+
+    // next() also jumps to the exact sub-ms deadline instead of Math.ceil(1 ms).
+    let nextAt = -1
+    testClock.clock.after(0.25, () => { nextAt = testClock.elapsed() })
+    expect(await testClock.next()).toBe(true)
+    expect(nextAt).toBeCloseTo(0.75, 10)
+    expect(testClock.elapsed()).toBeCloseTo(0.75, 10)
+    testClock.close()
+  })
+
+  it('supports advance(0) for immediate turns without moving time, and rejects invalid or overflowing durations', async () => {
     const testClock = new TestClock({ wall: 500 })
     const ran: string[] = []
     testClock.clock.after(0, () => { ran.push(`zero@${testClock.clock.now()}`) })
@@ -37,6 +85,7 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     await testClock.advance(0)
     expect(ran).toEqual(['zero@500'])
     expect(testClock.clock.now()).toBe(500)
+    expect(testClock.elapsed()).toBe(0)
     expect(testClock.waiting()).toBe(1)
 
     for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
@@ -47,68 +96,106 @@ describe('TestClock (@apackdev/clock/testing)', () => {
 
     await testClock.advance(10)
     expect(ran).toEqual(['zero@500', 'ten@510'])
-    // Advancing past the last scheduled timer still advances wall time by the remaining tail.
+    // Advancing past the last scheduled timer still advances wall and monotonic time by the remaining tail.
     await testClock.advance(25)
     expect(testClock.clock.now()).toBe(535)
+    expect(testClock.elapsed()).toBe(35)
+
+    // Overflowing mono + ms to Infinity rejects with RangeError without corrupting elapsed().
+    const huge = new TestClock()
+    await huge.advance(Number.MAX_VALUE)
+    expect(huge.elapsed()).toBe(Number.MAX_VALUE)
+    await expect(huge.advance(Number.MAX_VALUE)).rejects.toThrow(/overflow/)
+    expect(huge.elapsed()).toBe(Number.MAX_VALUE)
+    huge.close()
     testClock.close()
   })
 
-  it('steps one event at a time with next() and drains everything with drain()', async () => {
+  it('steps one real callback at a time with next() (skipping cancelled turns/timers) and drains with drain()', async () => {
     const testClock = new TestClock()
     const ran: string[] = []
 
     expect(await testClock.next()).toBe(false)
 
-    // Cancelling the sole timer disarms the driver so next() returns false and time does not jump.
+    // Cancelling the sole delayed timer disarms the driver so next() returns false and time does not jump.
     const cancelSole = testClock.clock.after(50, () => { ran.push('cancelled') })
     cancelSole()
     expect(await testClock.next()).toBe(false)
-    expect(testClock.clock.now()).toBe(0)
+    expect(testClock.elapsed()).toBe(0)
 
-    testClock.clock.after(30, () => { ran.push(`c@${testClock.clock.now()}`) })
-    testClock.clock.after(0, () => { ran.push(`a@${testClock.clock.now()}`) })
+    // Cancelling the sole 0-ms turn must also cause next() to return false (draining the stale turn invisibly).
+    const cancelZero = testClock.clock.after(0, () => { ran.push('cancelled-zero') })
+    cancelZero()
+    expect(await testClock.next()).toBe(false)
+    expect(ran).toEqual([])
+
+    // Cancelling a 0-ms turn when a later timer waits causes next() to skip the stale turn and run the real timer.
+    const cancelZero2 = testClock.clock.after(0, () => { ran.push('cancelled-zero-2') })
+    testClock.clock.after(12, () => { ran.push(`after-stale@${testClock.elapsed()}`) })
+    cancelZero2()
+    expect(await testClock.next()).toBe(true)
+    expect(ran).toEqual(['after-stale@12'])
+
+    ran.length = 0
+    testClock.clock.after(30, () => { ran.push(`c@${testClock.elapsed()}`) })
+    testClock.clock.after(0, () => { ran.push(`a@${testClock.elapsed()}`) })
     testClock.clock.after(10, () => {
-      ran.push(`b@${testClock.clock.now()}`)
-      testClock.clock.after(5, () => { ran.push(`b2@${testClock.clock.now()}`) })
+      ran.push(`b@${testClock.elapsed()}`)
+      testClock.clock.after(5, () => { ran.push(`b2@${testClock.elapsed()}`) })
     })
 
     expect(await testClock.next()).toBe(true)
-    expect(ran).toEqual(['a@0'])
+    expect(ran).toEqual(['a@12'])
     expect(await testClock.next()).toBe(true)
-    expect(ran).toEqual(['a@0', 'b@10'])
+    expect(ran).toEqual(['a@12', 'b@22'])
 
     await testClock.drain()
-    expect(ran).toEqual(['a@0', 'b@10', 'b2@15', 'c@30'])
+    expect(ran).toEqual(['a@12', 'b@22', 'b2@27', 'c@42'])
     expect(testClock.waiting()).toBe(0)
     expect(await testClock.next()).toBe(false)
     testClock.close()
   })
 
-  it('crosses multi-hop waits (> MAX_TIMER_MS) cleanly in advance() and drain()', async () => {
-    const testClock = new TestClock()
-    const ran: number[] = []
+  it('crosses multi-hop waits (> MAX_TIMER_MS) transparently in next(), advance(), and drain() without counting hops against maxSteps', async () => {
     const long = MAX_TIMER_MS * 2 + 50
-    testClock.clock.after(long, () => { ran.push(testClock.clock.now()) })
 
-    await testClock.advance(MAX_TIMER_MS)
-    expect(ran).toEqual([])
-    expect(testClock.waiting()).toBe(1)
+    // One next() call crosses all internal MAX_TIMER_MS hops and runs the actual callback.
+    const byNext = new TestClock({ maxSteps: 1 })
+    const nextRan: number[] = []
+    byNext.clock.after(long, () => { nextRan.push(byNext.elapsed()) })
+    expect(await byNext.next()).toBe(true)
+    expect(nextRan).toEqual([long])
+    expect(byNext.waiting()).toBe(0)
+    expect(await byNext.next()).toBe(false)
+    byNext.close()
 
-    await testClock.drain()
-    expect(ran).toEqual([long])
-    expect(testClock.waiting()).toBe(0)
-    testClock.close()
+    // advance() across intermediate hops does not fire early, and drain() with maxSteps: 1 finishes the 1 callback.
+    const byAdvance = new TestClock({ maxSteps: 1 })
+    const advRan: number[] = []
+    byAdvance.clock.after(long, () => { advRan.push(byAdvance.elapsed()) })
+    await byAdvance.advance(MAX_TIMER_MS)
+    expect(advRan).toEqual([])
+    expect(byAdvance.elapsed()).toBe(MAX_TIMER_MS)
+    expect(byAdvance.waiting()).toBe(1)
+    await byAdvance.drain()
+    expect(advRan).toEqual([long])
+    expect(byAdvance.waiting()).toBe(0)
+    byAdvance.close()
   })
 
-  it('preserves ClockController wall clamping, suspend/resume, AbortSignal, and close semantics', async () => {
+  it('preserves ClockController wall clamping, elapsed() isolation, suspend/resume, AbortSignal, and close semantics', async () => {
     const testClock = new TestClock({ wall: 10_000 })
     const { clock } = testClock
     expect(clock.now()).toBe(10_000)
+    expect(testClock.elapsed()).toBe(0)
 
-    // Backward or non-finite wall jump never moves clock.now() backward or shifts timers.
+    // Backward or non-finite wall jump never moves clock.now() backward or affects elapsed().
     testClock.setWall(5_000)
     expect(clock.now()).toBe(10_000)
     testClock.setWall(Number.NaN)
+    expect(clock.now()).toBe(10_000)
+    await testClock.advance(25)
+    expect(testClock.elapsed()).toBe(25)
     expect(clock.now()).toBe(10_000)
     testClock.setWall(12_000)
     expect(clock.now()).toBe(12_000)
@@ -126,6 +213,7 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(await testClock.next()).toBe(false)
     await testClock.advance(100)
     expect(ran).toEqual([])
+    expect(testClock.elapsed()).toBe(125)
     testClock.resume()
     await testClock.advance(0)
     expect(ran).toEqual(['zero'])
@@ -160,13 +248,19 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     }
     expect(() => new TestClock({ maxSteps: 0 })).toThrow(/given 0/)
 
-    // maxSteps === 1 is valid (minimum positive safe integer) and terminates cleanly when queue empties (armed === undefined).
-    const one = new TestClock({ maxSteps: 1 })
+    // maxSteps === 1 succeeds when a microtask cancels the queued second 0-ms turn (leaving a stale pendingTurn with waiting() === 0).
+    const staleAfterOne = new TestClock({ maxSteps: 1 })
     let ranOne = 0
-    one.clock.after(5, () => { ranOne++ })
-    await one.advance(10)
+    let cancelSecond = () => {}
+    staleAfterOne.clock.after(0, () => {
+      ranOne++
+      void Promise.resolve().then(() => { cancelSecond() })
+    })
+    cancelSecond = staleAfterOne.clock.after(0, () => { ranOne++ })
+    await staleAfterOne.advance(0)
     expect(ranOne).toBe(1)
-    one.close()
+    expect(staleAfterOne.waiting()).toBe(0)
+    staleAfterOne.close()
 
     // Exact boundary: 2 steps allowed when maxSteps === 2, even if a later timer sits past target.
     const exact = new TestClock({ maxSteps: 2 })
@@ -178,13 +272,20 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(ran).toEqual([1, 2])
     exact.close()
 
-    // Exact boundary: a 3rd timer sitting at due === target still trips maxSteps === 2.
+    // Exact boundary: a 3rd timer sitting at due === target (and sub-ms due <= target) trips maxSteps === 2.
     const atTarget = new TestClock({ maxSteps: 2 })
     atTarget.clock.after(1, () => {})
     atTarget.clock.after(2, () => {})
     atTarget.clock.after(10, () => {})
     await expect(atTarget.advance(10)).rejects.toThrow(/maxSteps \(2\) during advance\(10\)/)
     atTarget.close()
+
+    const subMsAtTarget = new TestClock({ maxSteps: 2 })
+    subMsAtTarget.clock.after(0.1, () => {})
+    subMsAtTarget.clock.after(0.2, () => {})
+    subMsAtTarget.clock.after(0.3, () => {})
+    await expect(subMsAtTarget.advance(0.5)).rejects.toThrow(/maxSteps \(2\) during advance\(0.5\)/)
+    subMsAtTarget.close()
 
     // Exceeding maxSteps in advance() throws before the (maxSteps + 1)th step (both turn and timer cases).
     const loopTurn = new TestClock({ maxSteps: 3 })
@@ -239,13 +340,14 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(reentrantError).toBeInstanceOf(Error)
     expect((reentrantError as Error).message).toMatch(/already stepping/)
 
-    // A throwing callback rejects advance() without wedging TestClock; remaining timers still run.
+    // A throwing callback rejects advance() at that callback's timestamp without wedging TestClock; remaining timers still run.
     const ran: string[] = []
     testClock.clock.after(10, () => { throw new Error('boom') })
-    testClock.clock.after(20, () => { ran.push('after-boom') })
+    testClock.clock.after(20, () => { ran.push(`after-boom@${testClock.elapsed()}`) })
     await expect(testClock.advance(20)).rejects.toThrow('boom')
+    expect(testClock.elapsed()).toBe(15)
     await testClock.advance(10)
-    expect(ran).toEqual(['after-boom'])
+    expect(ran).toEqual(['after-boom@25'])
     testClock.close()
   })
 
@@ -332,6 +434,85 @@ describe('TestClock (@apackdev/clock/testing)', () => {
       browserClock.close()
     } finally {
       vi.unstubAllGlobals()
+    }
+  })
+
+  it('preserves ordering, exact non-early firing, wall monotonicity, and waiting() across 40 randomized traces', async () => {
+    for (let seed = 1; seed <= 40; seed++) {
+      const rand = prng(seed)
+      const testClock = new TestClock({ wall: 10_000 })
+      const { clock } = testClock
+      let lastWall = clock.now()
+      let lastElapsed = 0
+      let suspended = false
+      let suspendedAt = 0
+      const live: Array<{ id: number; due: number; cancel: () => void; ran: boolean }> = []
+      let nextId = 0
+
+      for (let step = 0; step < 30; step++) {
+        const roll = rand()
+        if (roll < 0.40) {
+          const delay = rand() < 0.25 ? Math.floor(rand() * 4) * 0.25 : Math.floor(rand() * 20)
+          const id = nextId++
+          const entry = {
+            id,
+            due: (suspended ? suspendedAt : testClock.elapsed()) + delay,
+            cancel: () => {},
+            ran: false,
+          }
+          entry.cancel = clock.after(delay, () => {
+            expect(entry.ran).toBe(false)
+            expect(suspended).toBe(false)
+            expect(testClock.elapsed()).toBeGreaterThanOrEqual(entry.due)
+            entry.ran = true
+            const idx = live.indexOf(entry)
+            expect(idx).toBeGreaterThanOrEqual(0)
+            live.splice(idx, 1)
+          })
+          live.push(entry)
+        } else if (roll < 0.55 && live.length > 0) {
+          const idx = Math.floor(rand() * live.length)
+          const [removed] = live.splice(idx, 1)
+          removed!.cancel()
+        } else if (roll < 0.75) {
+          const delta = rand() < 0.3 ? Math.floor(rand() * 4) * 0.25 : Math.floor(rand() * 15)
+          await testClock.advance(delta)
+        } else if (roll < 0.85) {
+          await testClock.next()
+        } else if (roll < 0.93) {
+          if (!suspended) {
+            suspended = true
+            suspendedAt = testClock.elapsed()
+            testClock.suspend()
+          } else {
+            const span = testClock.elapsed() - suspendedAt
+            suspended = false
+            for (const item of live) item.due += span
+            testClock.resume()
+          }
+        } else {
+          testClock.setWall(clock.now() + (Math.floor(rand() * 200) - 100))
+        }
+
+        const nowWall = clock.now()
+        const nowElapsed = testClock.elapsed()
+        expect(nowWall).toBeGreaterThanOrEqual(lastWall)
+        expect(nowElapsed).toBeGreaterThanOrEqual(lastElapsed)
+        lastWall = nowWall
+        lastElapsed = nowElapsed
+        expect(testClock.waiting()).toBe(live.length)
+      }
+
+      if (suspended) {
+        const span = testClock.elapsed() - suspendedAt
+        suspended = false
+        for (const item of live) item.due += span
+        testClock.resume()
+      }
+      await testClock.drain()
+      expect(live).toHaveLength(0)
+      expect(testClock.waiting()).toBe(0)
+      testClock.close()
     }
   })
 })

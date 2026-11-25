@@ -61,6 +61,7 @@ const partial: Partial<ClockSources> = {}
 const tcOpts: TestClockOptions = { wall: 1000, maxSteps: 100 }
 const tc = new TestClock(tcOpts)
 const testHandoff: Clock = tc.clock
+const elapsedMs: number = tc.elapsed()
 // @ts-expect-error TestClock must not be assignable to Clock.
 const leakedTest: Clock = tc
 void minimal
@@ -68,6 +69,7 @@ void leaked
 void opts
 void partial
 void testHandoff
+void elapsedMs
 void leakedTest
 void ClockClosedError
 void MAX_TIMER_MS

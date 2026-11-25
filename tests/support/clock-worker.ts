@@ -1,5 +1,6 @@
 // Runs inside a real browser DedicatedWorkerGlobalScope (no window, no document, no setImmediate).
 import { ClockController } from '../../src/index.ts'
+import { TestClock } from '../../src/testing.ts'
 
 const workerScope = globalThis as unknown as {
   readonly window?: unknown
@@ -27,6 +28,14 @@ const run = async (): Promise<void> => {
     controller.close()
     let closedAfter = false
     try { clock.after(1, () => {}) } catch (error) { closedAfter = error instanceof Error && error.name === 'ClockClosedError' }
+
+    const testClock = new TestClock({ wall: 100 })
+    let testClockWoke = -1
+    const sleepDone = testClock.clock.sleep(12.5).then(() => { testClockWoke = testClock.elapsed() })
+    await testClock.advance(20)
+    await sleepDone
+    testClock.close()
+
     workerScope.postMessage({
       ok: true,
       hasWindow: typeof workerScope.window !== 'undefined',
@@ -35,6 +44,7 @@ const run = async (): Promise<void> => {
       abortResult,
       closedAfter,
       waiting: controller.waiting(),
+      testClockWoke,
     })
   } catch (error) {
     controller.close()
