@@ -1,8 +1,8 @@
 name: CI
 
-# Every push to master and every pull request runs the suite on Linux, macOS and Windows, plus real Chromium browser
-# checks and 100% mutation testing: a clock runs in a window and in Node on all three. A newer push to the same branch
-# or pull request cancels the run before it.
+# Every push to master and every pull request runs the suite on Linux, macOS and Windows, plus real Chromium, Firefox,
+# and WebKit browser & Web Worker checks and 100% mutation testing: a clock runs in a window and in Node on all three.
+# A newer push to the same branch or pull request cancels the run before it.
 on:
   push:
     branches: [master]

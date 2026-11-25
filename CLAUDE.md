@@ -10,12 +10,12 @@ public contract; this file holds internal design details, vocabulary, and contri
   behind), the one armed timer for what is due first, and the real sources it reads unless given others. `src/index.ts`
   re-exports only the public `@apackdev/clock` contract.
 - `src/testing.ts` is the deterministic testing driver (`@apackdev/clock/testing`): `TestClock`, wrapping
-  `ClockController` via `ClockSources` (plus package-internal `clockInternals` for exact sub-ms deadlines and
-  hop-transparent `next()` / `maxSteps`) with O(1) driver state, async microtask-flushing `advance()`/`next()`/`drain()`,
+  `ClockController` via `ClockSources` (plus package-internal `clockInternals` for exact `O(1)` deadline jumps and
+  `maxSteps` dispatch counting) with `O(1)` driver state, async microtask-flushing `advance()`/`next()`/`drain()`,
   `elapsed()`, `setWall()`, and `maxSteps` runaway protection.
 - `tests/clock.spec.ts` holds each guarantee in the README as a case. `tests/testing.spec.ts` covers `TestClock`
-  stepping, sub-ms accuracy, hop-transparent `next()`, microtask flushing, lifecycle forwarding, `maxSteps`,
-  re-entrancy guards, `MessageChannel` ref/unref/close, and 40 randomized traces. `tests/proof.spec.ts` explores every reachable
+  stepping, sub-ms accuracy, direct `O(1)` jumps across multi-decade waits, microtask flushing, lifecycle forwarding,
+  `maxSteps`, re-entrancy guards, `MessageChannel` ref/unref/close, and 40 randomized traces. `tests/proof.spec.ts` explores every reachable
   state of `ClockController` within finite bounds (up to 3 waits for core scheduling/suspend/resume/wake/cancel/close,
   up to 2 waits for multi-hop and re-entrant callbacks) for both safety and liveness. `tests/model.spec.ts` runs 400
   seeded random traces. `tests/contracts.spec.ts` and `tests/support/checked-sources.ts` enforce all four source
