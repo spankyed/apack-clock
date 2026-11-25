@@ -6,13 +6,15 @@
 import { ClockController, clockInternals, type Clock } from './clock.ts'
 
 export interface TestClockOptions {
-  /** Initial wall-clock reading in milliseconds since 1970 (default `0`). */
-  readonly wall?: number
+  /** Initial wall-clock reading in milliseconds since 1970, or a `Date` (default `0`). */
+  readonly wall?: number | Date
   /** Maximum dispatched callbacks per `advance()` or `drain()` call before throwing `RangeError` (default `10_000`). */
   readonly maxSteps?: number
 }
 
 const DEFAULT_MAX_STEPS = 10_000
+
+const toWall = (value: number | Date): number => (typeof value === 'number' ? value : value.getTime())
 
 /**
  * Deterministic test controller built on `ClockController` via `ClockSources`.
@@ -50,8 +52,8 @@ export class TestClock {
    * Throws `RangeError` if dispatched callbacks exceed `maxSteps`.
    */
   readonly drain: () => Promise<void>
-  /** Sets the virtual wall-clock reading (forward, backward, or non-finite) without moving monotonic time. */
-  readonly setWall: (ms: number) => void
+  /** Sets the virtual wall-clock reading (number or `Date`, forward, backward, or non-finite) without moving monotonic time. */
+  readonly setWall: (wall: number | Date) => void
 
   constructor(options: TestClockOptions = {}) {
     const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS
@@ -60,7 +62,7 @@ export class TestClock {
     }
 
     let mono = 0
-    let wall = options.wall ?? 0
+    let wall = toWall(options.wall ?? 0)
     let armed: { readonly due: number; readonly run: () => void } | undefined
     let pendingTurn: (() => void) | undefined
     let stepping = false
@@ -199,6 +201,6 @@ export class TestClock {
       return false
     })
     this.drain = () => guard(() => runUntil(Number.POSITIVE_INFINITY, 'drain()'))
-    this.setWall = (ms) => { wall = ms }
+    this.setWall = (next) => { wall = toWall(next) }
   }
 }

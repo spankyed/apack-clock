@@ -94,13 +94,13 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 
 | | |
 |---|---|
-| `new TestClock(options?)` | Wraps `ClockController` on virtual `ClockSources` (`{ wall?: number; maxSteps?: number }`) |
+| `new TestClock(options?)` | Wraps `ClockController` on virtual `ClockSources` (`{ wall?: number \| Date; maxSteps?: number }`) |
 | `testClock.clock` | Frozen `Clock` to pass to code under test |
 | `testClock.elapsed()` | Virtual monotonic time elapsed in milliseconds (starts at `0`, independent of `setWall()`) |
 | `testClock.advance(ms)` | Advances virtual time by finite `ms >= 0` event-by-event (including sub-ms and multi-hop waits), flushing microtasks after each callback |
 | `testClock.next()` | Runs the next due callback (crossing cancelled turns and internal `MAX_TIMER_MS` hops transparently) and flushes microtasks; returns `false` when idle, suspended, or closed |
 | `testClock.drain()` | Runs all runnable callbacks in order (bounded by `maxSteps`), flushing microtasks after each |
-| `testClock.setWall(ms)` | Jumps virtual wall time (forward, backward, or non-finite) without moving monotonic time |
+| `testClock.setWall(wall)` | Jumps virtual wall time (`number` or `Date`, forward, backward, or non-finite) without moving monotonic time |
 | `testClock.waiting()` / `suspend()` / `resume()` / `close()` | Host lifecycle controls forwarded to the underlying `ClockController` |
 
 ### Errors
