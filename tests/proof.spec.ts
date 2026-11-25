@@ -63,12 +63,13 @@ const replay = (actions: readonly Action[]): ReplayState => {
 
   const ask = (ms: number, effect: NonNullable<Extract<Action, { kind: 'ask' }>['effect']> = 'none'): void => {
     const waitMs = Math.max(0, ms)
+    const scheduledMono = clock.monotonic()
     const thing: Thing = {
       id: things.length,
       effect,
       waitMs,
-      scheduledMono: clock.monotonic(),
-      due: (stopped ?? at.mono) + waitMs,
+      scheduledMono,
+      due: scheduledMono + waitMs,
       state: 'waits',
       off: () => {},
     }
@@ -77,7 +78,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
       holds(!closed, `${thing.id} ran after close`)
       holds(stopped === undefined, `${thing.id} ran while suspended`)
       holds(thing.state === 'waits', `${thing.id} ran when ${thing.state}`)
-      holds(at.mono >= thing.due, `${thing.id} ran early at ${at.mono} < ${thing.due}`)
+      holds(clock.monotonic() >= thing.due, `${thing.id} ran early at ${clock.monotonic()} < ${thing.due}`)
       holds(clock.monotonic() - thing.scheduledMono >= thing.waitMs, `${thing.id} elapsed ${clock.monotonic() - thing.scheduledMono} < ${thing.waitMs}`)
       holds(first() === thing, `${thing.id} ran ahead of ${first()?.id}`)
       holds(++inTurn === 1, `${thing.id} shared a turn`)
@@ -117,7 +118,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
     } else if (stopped !== undefined) {
       holds(at.timers.length === 0, 'suspended clock has an active timer')
     } else if (at.turns === 0) {
-      holds(!next || next.due > at.mono, `due item ${next?.id} left waiting with no turn`)
+      holds(!next || next.due > mono, `due item ${next?.id} left waiting with no turn`)
       holds(at.timers.length === (next ? 1 : 0), `timer count ${at.timers.length} disagrees with waits ${live.length}`)
     } else {
       holds(at.timers.length === 0, 'timer armed while turn is pending')
@@ -145,9 +146,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
     } else if (action.kind === 'resume') {
       step(() => {
         at.mono += action.span
-        const span = at.mono - stopped!
-        for (const w of waits()) w.due += span
-        suspendedTotal += span
+        suspendedTotal += at.mono - stopped!
         stopped = undefined
         controller.resume()
       })
@@ -176,7 +175,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
 
   // Build canonical relative-time abstract state snapshot BEFORE running the liveness drain.
   const waiting = waits()
-  const base = stopped ?? at.mono
+  const base = clock.monotonic()
   const rel = waiting.map((thing) => `${Math.round((thing.due - base) * 100) / 100}:${thing.effect}`).join(',')
   const snapshot: ReplayState = {
     key: [
@@ -202,9 +201,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
     for (;;) {
       if (stopped !== undefined) {
         step(() => {
-          const span = at.mono - stopped!
-          for (const w of waits()) w.due += span
-          suspendedTotal += span
+          suspendedTotal += at.mono - stopped!
           stopped = undefined
           controller.resume()
         })

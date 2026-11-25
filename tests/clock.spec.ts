@@ -365,16 +365,19 @@ describe('the time it is', () => {
     expect(ran).toEqual(['a'])
   })
 
-  it('exposes monotonic() independent of wall jumps, excluding suspended spans without float dips, and continuous across close()', () => {
-    const { at, controller, clock } = made()
+  it('exposes monotonic() independent of wall-clock jumps', () => {
+    const { at, clock } = made()
     expect(clock.monotonic()).toBe(0)
     at.mono = 25
     at.wall += 3_600_000
     expect(clock.monotonic()).toBe(25)
     at.wall -= 7_200_000
     expect(clock.monotonic()).toBe(25)
+  })
 
-    // Schedule across two suspend/resume cycles: elapsed monotonic() matches the 100 ms wait exactly.
+  it('excludes suspended spans from monotonic() so elapsed time matches after() across suspend/resume cycles', () => {
+    const { at, controller, clock } = made()
+    at.mono = 25
     const start = clock.monotonic()
     let firedAt = -1
     clock.after(100, () => { firedAt = clock.monotonic() })
@@ -399,25 +402,30 @@ describe('the time it is', () => {
     at.wake()
     expect(firedAt).toBe(start + 100)
     expect(clock.monotonic()).toBe(125)
+  })
 
-    // Floating-point continuity across a large suspend span: 0.3 must not dip to 0.29999999999999716 on resume.
-    const fractional = made()
-    fractional.at.mono = 0.3
-    expect(fractional.clock.monotonic()).toBe(0.3)
-    fractional.controller.suspend()
-    fractional.at.mono = 100.3
-    expect(fractional.clock.monotonic()).toBe(0.3)
-    fractional.controller.resume()
-    expect(fractional.clock.monotonic()).toBe(0.3)
-    fractional.at.mono = 100.8
-    expect(fractional.clock.monotonic()).toBe(0.8)
-    fractional.controller.close()
-    // Closing while NOT suspended preserves monotonic() cleanly.
-    expect(fractional.clock.monotonic()).toBe(0.8)
-    fractional.at.mono = 101.8
-    expect(fractional.clock.monotonic()).toBe(1.8)
+  it('keeps monotonic() continuous across large suspend spans without floating-point dips', () => {
+    const { at, controller, clock } = made()
+    at.mono = 0.3
+    expect(clock.monotonic()).toBe(0.3)
+    controller.suspend()
+    at.mono = 100.3
+    expect(clock.monotonic()).toBe(0.3)
+    controller.resume()
+    // Must stay exact 0.3 rather than dipping to 0.29999999999999716.
+    expect(clock.monotonic()).toBe(0.3)
+    at.mono = 100.8
+    expect(clock.monotonic()).toBe(0.8)
+  })
 
-    // Closing while suspended folds the suspended span cleanly with no jump and keeps advancing afterward.
+  it('keeps monotonic() continuous across close() whether active or suspended', () => {
+    const active = made()
+    active.at.mono = 12
+    active.controller.close()
+    expect(active.clock.monotonic()).toBe(12)
+    active.at.mono = 20
+    expect(active.clock.monotonic()).toBe(20)
+
     const closedSuspended = made()
     closedSuspended.at.mono = 15
     closedSuspended.controller.suspend()
@@ -487,9 +495,8 @@ describe('suspending the count', () => {
     expect(ran).toEqual(['a'])
   })
 
-  it('preserves heap order when resuming collapses sub-ULP deadlines to equal floats', () => {
+  it('keeps sub-ULP deadlines distinct and in exact order across large suspend spans without shifting the heap', () => {
     const { at, ran, controller, clock, note } = made()
-    // Builds a 5-node heap with e0 (seq 0) at index 3 under e1 (index 1) and e4 (index 0).
     clock.after(2e-10, note('e0'))
     clock.after(1e-10, note('e1'))
     clock.after(3e-10, note('e2'))
@@ -498,9 +505,13 @@ describe('suspending the count', () => {
     controller.suspend()
     at.mono = 1e7
     controller.resume()
-    // All five deadlines collapse to 1e7; Floyd heapify restores exact FIFO order by seq.
+    // Deadlines stay on active monotonic time: only e4 (0 ms) is due immediately; the sub-ULP waits remain distinct.
     at.settle()
-    expect(ran).toEqual(['e0', 'e1', 'e2', 'e3', 'e4'])
+    expect(ran).toEqual(['e4'])
+    expect(controller.waiting()).toBe(4)
+    at.wake()
+    at.settle()
+    expect(ran).toEqual(['e4', 'e1', 'e3', 'e0', 'e2'])
     expect(controller.waiting()).toBe(0)
   })
 })

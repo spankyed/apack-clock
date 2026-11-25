@@ -200,17 +200,33 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(overflowed.waiting()).toBe(0)
     overflowed.close()
 
-    // Shifting an existing MAX_VALUE wait across a MAX_VALUE suspend span clamps to finite MAX_VALUE and still fires.
-    const clampedResume = new TestClock()
-    let resumedAt = 0
-    clampedResume.clock.after(Number.MAX_VALUE, () => { resumedAt = clampedResume.elapsed() })
-    clampedResume.suspend()
-    await clampedResume.advance(Number.MAX_VALUE)
-    clampedResume.resume()
-    expect(await clampedResume.next()).toBe(true)
-    expect(resumedAt).toBe(Number.MAX_VALUE)
-    expect(clampedResume.waiting()).toBe(0)
-    clampedResume.close()
+    // A MAX_VALUE wait suspended across a MAX_VALUE span stays waiting (never fires early); next()/drain() rejects with RangeError.
+    const unreachableResume = new TestClock()
+    let firedUnreachable = false
+    unreachableResume.clock.after(Number.MAX_VALUE, () => { firedUnreachable = true })
+    unreachableResume.suspend()
+    await unreachableResume.advance(Number.MAX_VALUE)
+    unreachableResume.resume()
+    await unreachableResume.advance(0)
+    expect(firedUnreachable).toBe(false)
+    expect(unreachableResume.clock.monotonic()).toBe(0)
+    expect(unreachableResume.waiting()).toBe(1)
+    await expect(unreachableResume.next()).rejects.toThrow(/beyond Number\.MAX_VALUE/)
+    expect(unreachableResume.elapsed()).toBe(Number.MAX_VALUE)
+    unreachableResume.close()
+
+    // Fractional wait across a suspend span where `resumeAnchor + (due - activeBase)` rounds down by 1 ULP still fires cleanly at monotonic() >= due.
+    const roundedResume = new TestClock()
+    await roundedResume.advance(0.1)
+    let firedMono = -1
+    roundedResume.clock.after(0.1, () => { firedMono = roundedResume.clock.monotonic() })
+    roundedResume.suspend()
+    await roundedResume.advance(10)
+    roundedResume.resume()
+    expect(await roundedResume.next()).toBe(true)
+    expect(firedMono).toBeGreaterThanOrEqual(0.2)
+    expect(roundedResume.waiting()).toBe(0)
+    roundedResume.close()
   })
 
   it('preserves ClockController wall clamping, elapsed() isolation, suspend/resume, AbortSignal, and close semantics', async () => {

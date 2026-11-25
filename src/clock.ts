@@ -1,8 +1,10 @@
-// A clock a program is handed in place of `setTimeout` and `Date.now()`: something to run after this long, and the
-// time it is. One heap of what waits, ordered by when each is due, and at most one armed timer for what is due first.
+// A clock a program is handed in place of `setTimeout`, `Date.now()`, and `performance.now()`: something to run after
+// this long, elapsed monotonic time, and the time it is. One heap of what waits, ordered by when each is due, and at
+// most one armed timer for what is due first.
 //
-// How long is counted on `monotonic`, so setting the time of day moves nothing that waits. The time it is comes from
-// `wall`, and is never earlier than what `now` last said.
+// Both `after` and `monotonic()` share one active monotonic timeline that excludes suspended spans, so setting the
+// time of day moves nothing that waits and `resume()` is O(1). The time it is comes from `wall`, and is never earlier
+// than what `now` last said.
 //
 // What it reads and what wakes it are handed in (`ClockSources`). A program hands in nothing and gets the real ones; a
 // spec hands in its own and chooses when each thing happens.
@@ -72,8 +74,8 @@ export interface Clock {
 export const MAX_TIMER_MS = 0x7fffffff
 
 interface Entry {
-  /** Moment on `monotonic` when this entry may run. */
-  due: number
+  /** Moment on `monotonic()` (active time, excluding suspended spans) when this entry may run. */
+  readonly due: number
   /** Tie-breaker among entries due at the same moment: lower was asked first. */
   readonly seq: number
   readonly run: () => void
@@ -184,8 +186,12 @@ const makeTurns = (): { readonly turn: ClockSources['turn']; close(): void } => 
 
 /** Package-internal hooks used by `@apackdev/clock/testing`; never re-exported from `@apackdev/clock`. */
 export interface ClockInternal {
-  /** Exact monotonic deadline of the earliest waiting entry (only called while a timer is armed). */
+  /** Exact active monotonic deadline of the earliest waiting entry (only called while a timer is armed). */
   readonly nextDue: () => number
+  /** Active monotonic time accumulated up to the most recent resume. */
+  readonly activeBase: () => number
+  /** Raw `from.monotonic()` reading at the most recent resume. */
+  readonly resumeAnchor: () => number
   /** Count of due user callbacks dispatched so far (never incremented by internal hops or cancelled/suspended wakes). */
   readonly dispatched: () => number
 }
@@ -259,13 +265,21 @@ export class ClockController {
       cancel()
     }
 
+    const monotonic: Clock['monotonic'] = () => activeBase + ((suspended ?? from.monotonic()) - resumeAnchor)
+
+    const finishSuspend = (since: number, at: number): void => {
+      activeBase += since - resumeAnchor
+      resumeAnchor = at
+      suspended = undefined
+    }
+
     /** Sees to what is due first: asks for a turn if it is due now, or arms one hop if it is not. */
     const arm = (): void => {
       if (running || closed || turning || suspended !== undefined) return
       disarm()
       const first = heap[0]
       if (!first) return
-      const left = first.due - from.monotonic()
+      const left = first.due - monotonic()
       if (left <= 0) {
         turning = true
         from.turn(() => { turning = false; next() })
@@ -284,7 +298,7 @@ export class ClockController {
     const next = (): void => {
       if (closed || suspended !== undefined) return
       const first = heap[0]
-      if (!first || first.due > from.monotonic()) { arm(); return }
+      if (!first || first.due > monotonic()) { arm(); return }
       removeAt(heap, 0)
       dispatched++
       // Whatever it throws is handed on, and what still waits is seen to either way.
@@ -298,18 +312,10 @@ export class ClockController {
       return said
     }
 
-    const monotonic: Clock['monotonic'] = () => activeBase + ((suspended ?? from.monotonic()) - resumeAnchor)
-
-    const finishSuspend = (at: number): void => {
-      activeBase += suspended! - resumeAnchor
-      resumeAnchor = at
-      suspended = undefined
-    }
-
     const after: Clock['after'] = (ms, run) => {
       assertFinite(ms)
       if (closed) throw new ClockClosedError()
-      const due = (suspended ?? from.monotonic()) + Math.max(0, ms)
+      const due = monotonic() + Math.max(0, ms)
       if (!Number.isFinite(due)) {
         throw new RangeError(`A clock wait of ${String(ms)} ms overflows the monotonic deadline`)
       }
@@ -353,7 +359,7 @@ export class ClockController {
     })
 
     const close = (): void => {
-      if (suspended !== undefined) finishSuspend(from.monotonic())
+      if (suspended !== undefined) finishSuspend(suspended, from.monotonic())
       closed = true
       disarm()
       heap.length = 0
@@ -370,18 +376,15 @@ export class ClockController {
     }
     this.resume = () => {
       if (suspended === undefined) return
-      const at = from.monotonic()
-      const span = at - suspended
-      finishSuspend(at)
-      for (const entry of heap) {
-        const shifted = entry.due + span
-        entry.due = Number.isFinite(shifted) ? shifted : Number.MAX_VALUE
-      }
-      // Adding `span` can round two distinct `due` times to the same float, reversing their `seq` tie-break order.
-      for (let index = (heap.length >> 1) - 1; index >= 0; index--) siftDown(heap, index)
+      finishSuspend(suspended, from.monotonic())
       arm()
     }
     this.close = close
-    clockInternals.set(this, { nextDue: () => heap[0]!.due, dispatched: () => dispatched })
+    clockInternals.set(this, {
+      nextDue: () => heap[0]!.due,
+      activeBase: () => activeBase,
+      resumeAnchor: () => resumeAnchor,
+      dispatched: () => dispatched,
+    })
   }
 }

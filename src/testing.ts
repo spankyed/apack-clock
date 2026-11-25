@@ -14,6 +14,15 @@ export interface TestClockOptions {
 
 const DEFAULT_MAX_STEPS = 10_000
 
+const f64 = new Float64Array(1)
+const u64 = new BigUint64Array(f64.buffer)
+/** Smallest float64 strictly greater than positive finite `x` (maps `Number.MAX_VALUE` to `+Infinity`). */
+const nextUpPositive = (x: number): number => {
+  f64[0] = x
+  u64[0] = u64[0]! + 1n
+  return f64[0]!
+}
+
 const toWall = (value: number | Date): number => (typeof value === 'number' ? value : value.getTime())
 
 /**
@@ -112,6 +121,15 @@ export class TestClock {
     })
     const internal = clockInternals.get(controller)!
 
+    const nextRawDue = (): number => {
+      const due = internal.nextDue()
+      const base = internal.activeBase()
+      const anchor = internal.resumeAnchor()
+      let wakeAt = anchor + (due - base)
+      while (base + (wakeAt - anchor) < due) wakeAt = nextUpPositive(wakeAt)
+      return wakeAt
+    }
+
     const stepOne = (limit: number): boolean => {
       if (pendingTurn) {
         const run = pendingTurn
@@ -120,10 +138,13 @@ export class TestClock {
         return true
       }
       if (armed) {
-        // Jump straight to the exact finite deadline `nextDue()` in O(1): fractional waits fire at their exact
-        // deadline, and extreme durations never stall or spin through intermediate `MAX_TIMER_MS` hops.
-        const wakeAt = internal.nextDue()
+        // Jump straight to the exact finite raw deadline in O(1): fractional waits fire at their exact deadline,
+        // and extreme durations never stall or spin through intermediate `MAX_TIMER_MS` hops.
+        const wakeAt = nextRawDue()
         if (wakeAt <= limit) {
+          if (!Number.isFinite(wakeAt)) {
+            throw new RangeError('TestClock cannot advance to a deadline beyond Number.MAX_VALUE')
+          }
           const run = armed
           armed = undefined
           const delta = wakeAt - mono
@@ -138,7 +159,7 @@ export class TestClock {
 
     const hasWorkUpTo = (limit: number): boolean =>
       (pendingTurn !== undefined && controller.waiting() > 0) ||
-      (armed !== undefined && internal.nextDue() <= limit)
+      (armed !== undefined && nextRawDue() <= limit)
 
     const guard = async <T>(work: () => Promise<T>): Promise<T> => {
       if (stepping) throw new Error('TestClock is already stepping; await the previous advance, next, or drain call first')
