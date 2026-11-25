@@ -26,6 +26,8 @@ type Action =
 interface Thing {
   readonly id: number
   readonly effect: NonNullable<Extract<Action, { kind: 'ask' }>['effect']>
+  readonly waitMs: number
+  readonly scheduledMono: number
   due: number
   state: 'waits' | 'ran' | 'off'
   off: () => void
@@ -48,8 +50,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
   const { clock } = controller
   const things: Thing[] = []
   let stopped: number | undefined
-  let activeBase = 0
-  let resumeAnchor = 0
+  let suspendedTotal = 0
   let lastMono = Number.NEGATIVE_INFINITY
   let closed = false
   let inTurn = 0
@@ -61,10 +62,13 @@ const replay = (actions: readonly Action[]): ReplayState => {
   const first = (): Thing | undefined => waits().reduce<Thing | undefined>((best, thing) => (!best || thing.due < best.due ? thing : best), undefined)
 
   const ask = (ms: number, effect: NonNullable<Extract<Action, { kind: 'ask' }>['effect']> = 'none'): void => {
+    const waitMs = Math.max(0, ms)
     const thing: Thing = {
       id: things.length,
       effect,
-      due: (stopped ?? at.mono) + Math.max(0, ms),
+      waitMs,
+      scheduledMono: clock.monotonic(),
+      due: (stopped ?? at.mono) + waitMs,
       state: 'waits',
       off: () => {},
     }
@@ -74,6 +78,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
       holds(stopped === undefined, `${thing.id} ran while suspended`)
       holds(thing.state === 'waits', `${thing.id} ran when ${thing.state}`)
       holds(at.mono >= thing.due, `${thing.id} ran early at ${at.mono} < ${thing.due}`)
+      holds(clock.monotonic() - thing.scheduledMono >= thing.waitMs, `${thing.id} elapsed ${clock.monotonic() - thing.scheduledMono} < ${thing.waitMs}`)
       holds(first() === thing, `${thing.id} ran ahead of ${first()?.id}`)
       holds(++inTurn === 1, `${thing.id} shared a turn`)
       thing.state = 'ran'
@@ -101,7 +106,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
     holds(controller.waiting() === live.length, `waiting() ${controller.waiting()} !== ${live.length}`)
     holds(at.timers.length <= 1, `timers.length = ${at.timers.length}`)
     const mono = clock.monotonic()
-    const expectedMono = activeBase + ((stopped ?? at.mono) - resumeAnchor)
+    const expectedMono = (stopped ?? at.mono) - suspendedTotal
     holds(mono >= lastMono, `monotonic() went backward from ${lastMono} to ${mono}`)
     holds(mono === expectedMono, `monotonic() ${mono} !== expected ${expectedMono}`)
     lastMono = mono
@@ -142,8 +147,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
         at.mono += action.span
         const span = at.mono - stopped!
         for (const w of waits()) w.due += span
-        activeBase += stopped! - resumeAnchor
-        resumeAnchor = at.mono
+        suspendedTotal += span
         stopped = undefined
         controller.resume()
       })
@@ -156,8 +160,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
     } else {
       step(() => {
         if (stopped !== undefined) {
-          activeBase += stopped - resumeAnchor
-          resumeAnchor = at.mono
+          suspendedTotal += at.mono - stopped
           stopped = undefined
         }
         controller.close()
@@ -201,8 +204,7 @@ const replay = (actions: readonly Action[]): ReplayState => {
         step(() => {
           const span = at.mono - stopped!
           for (const w of waits()) w.due += span
-          activeBase += stopped! - resumeAnchor
-          resumeAnchor = at.mono
+          suspendedTotal += span
           stopped = undefined
           controller.resume()
         })
