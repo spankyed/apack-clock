@@ -1,6 +1,6 @@
 // Build reproducibility and size/cost guardrails on the compiled package:
 //   1. Snapshots `dist/`, rebuilds `dist/` cleanly from scratch, and asserts every emitted file matches byte-for-byte.
-//   2. Records and bounds raw and gzipped sizes of `dist/index.js` and `dist/index.d.ts`.
+//   2. Records and bounds raw and gzipped sizes of `dist/index.js`, `dist/testing.js`, and their `.d.ts` files.
 //   3. Verifies steady-state scheduler cost on `dist/index.js`: 1,000 non-head asks and cancels arm exactly 1 timer.
 //
 //   npm run package:check
@@ -35,12 +35,19 @@ for (const [name, hash] of first) {
 
 const jsBytes = fs.readFileSync(path.join(distDir, 'index.js'))
 const jsGzip = gzipSync(jsBytes, { level: 9 }).length
+const testingJsBytes = fs.readFileSync(path.join(distDir, 'testing.js'))
+const testingJsGzip = gzipSync(testingJsBytes, { level: 9 }).length
 const dtsBytes = fs.readFileSync(path.join(distDir, 'index.d.ts'))
+const testingDtsBytes = fs.readFileSync(path.join(distDir, 'testing.d.ts'))
 
 const MAX_JS_RAW = 13_000
 const MAX_JS_GZIP = 4_000
+const MAX_TESTING_JS_RAW = 8_000
+const MAX_TESTING_JS_GZIP = 2_500
 if (jsBytes.length > MAX_JS_RAW) throw new Error(`dist/index.js grew to ${jsBytes.length} B (limit ${MAX_JS_RAW} B)`)
 if (jsGzip > MAX_JS_GZIP) throw new Error(`dist/index.js gzip grew to ${jsGzip} B (limit ${MAX_JS_GZIP} B)`)
+if (testingJsBytes.length > MAX_TESTING_JS_RAW) throw new Error(`dist/testing.js grew to ${testingJsBytes.length} B (limit ${MAX_TESTING_JS_RAW} B)`)
+if (testingJsGzip > MAX_TESTING_JS_GZIP) throw new Error(`dist/testing.js gzip grew to ${testingJsGzip} B (limit ${MAX_TESTING_JS_GZIP} B)`)
 
 const { ClockController } = await import(pathToFileURL(path.join(distDir, 'index.js')).href)
 let mono = 0
@@ -63,6 +70,7 @@ if (armedCount !== 1) throw new Error(`Expected 1 armed timer across 1,000 non-h
 
 console.log(
   `reproducible build verified (${first.size} files, sha256=${first.get('index.js').slice(0, 12)}), ` +
-  `dist/index.js=${jsBytes.length} B (${jsGzip} B gzip), dist/index.d.ts=${dtsBytes.length} B, ` +
+  `dist/index.js=${jsBytes.length} B (${jsGzip} B gzip), dist/testing.js=${testingJsBytes.length} B (${testingJsGzip} B gzip), ` +
+  `d.ts=${dtsBytes.length + testingDtsBytes.length} B, ` +
   `1000 non-head asks+cancels=${elapsedMs.toFixed(2)} ms (1 armed timer)`,
 )
