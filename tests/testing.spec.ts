@@ -200,6 +200,19 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     testClock.setWall(12_000)
     expect(clock.now()).toBe(12_000)
 
+    // Date values work in both constructor wall option and setWall() (including backward and invalid Date).
+    const start = new Date('2026-01-01T00:00:00.000Z')
+    const dated = new TestClock({ wall: start })
+    expect(dated.clock.now()).toBe(start.getTime())
+    dated.setWall(new Date('2025-12-31T23:59:00.000Z'))
+    expect(dated.clock.now()).toBe(start.getTime())
+    dated.setWall(new Date(Number.NaN))
+    expect(dated.clock.now()).toBe(start.getTime())
+    const later = new Date('2026-01-01T01:00:00.000Z')
+    dated.setWall(later)
+    expect(dated.clock.now()).toBe(later.getTime())
+    dated.close()
+
     // Suspend when no turn is pending, then resume cleanly.
     testClock.suspend()
     expect(await testClock.next()).toBe(false)

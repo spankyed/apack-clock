@@ -58,8 +58,10 @@ void handoff.close
 void handoff.suspend
 const opts: ClockSleepOptions = {}
 const partial: Partial<ClockSources> = {}
-const tcOpts: TestClockOptions = { wall: 1000, maxSteps: 100 }
+const tcOpts: TestClockOptions = { wall: new Date('2026-01-01T00:00:00.000Z'), maxSteps: 100 }
 const tc = new TestClock(tcOpts)
+tc.setWall(new Date('2026-01-02T00:00:00.000Z'))
+tc.setWall(1000)
 const testHandoff: Clock = tc.clock
 const elapsedMs: number = tc.elapsed()
 // @ts-expect-error TestClock must not be assignable to Clock.
