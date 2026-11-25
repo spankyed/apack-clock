@@ -24,6 +24,9 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
   const things: Thing[] = []
   const did: string[] = []
   let stopped: number | undefined
+  let activeBase = 0
+  let resumeAnchor = 0
+  let lastMono = Number.NEGATIVE_INFINITY
   /** What ran in the turn under way. */
   let inTurn = 0
   let lastSaid = Number.NEGATIVE_INFINITY
@@ -96,6 +99,11 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     holds(said >= lastSaid, `the time went back from ${lastSaid} to ${said}`)
     holds(said === highest, `the time is said to be ${said}, and the latest the time of day has been is ${highest}`)
     lastSaid = said
+    const mono = clock.monotonic()
+    const expectedMono = activeBase + ((stopped ?? at.mono) - resumeAnchor)
+    holds(mono >= lastMono, `monotonic() went back from ${lastMono} to ${mono}`)
+    holds(mono === expectedMono, `monotonic() is ${mono}, expected ${expectedMono}`)
+    lastMono = mono
   }
 
   for (let step = 0; step < steps; step++) {
@@ -127,6 +135,8 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
         at.mono += random.pick([0, 1, 30_000, 3_600_000])
         const span = at.mono - stopped!
         for (const thing of waits()) thing.due += span
+        activeBase += stopped! - resumeAnchor
+        resumeAnchor = at.mono
         stopped = undefined
         controller.resume()
       })
@@ -138,7 +148,16 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
 
   // Every 10th run closes mid-flight and verifies nothing fires and after() throws ClockClosedError; the rest drain to completion.
   if (seed % 10 === 0) {
-    turn('closed', () => { controller.close() })
+    turn('closed', () => {
+      if (stopped !== undefined) {
+        activeBase += stopped - resumeAnchor
+        resumeAnchor = at.mono
+        stopped = undefined
+      }
+      controller.close()
+    })
+    holds(clock.monotonic() >= lastMono, `monotonic() went back on close from ${lastMono} to ${clock.monotonic()}`)
+    holds(clock.monotonic() === activeBase + (at.mono - resumeAnchor), `monotonic() mismatch after close`)
     holds(controller.waiting() === 0, `waiting() after close is ${controller.waiting()}`)
     holds(at.timers.length === 0, `timers after close: ${at.timers.length}`)
     let threwClosed = false
@@ -154,7 +173,14 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
   let hops = 0
   for (;;) {
     if (stopped !== undefined) {
-      turn('resumed', () => { const span = at.mono - stopped!; for (const thing of waits()) thing.due += span; stopped = undefined; controller.resume() })
+      turn('resumed', () => {
+        const span = at.mono - stopped!
+        for (const thing of waits()) thing.due += span
+        activeBase += stopped! - resumeAnchor
+        resumeAnchor = at.mono
+        stopped = undefined
+        controller.resume()
+      })
       check()
     }
     while (at.turns) { turn('a turn', () => { at.turn() }); check() }

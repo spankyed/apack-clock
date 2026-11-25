@@ -364,6 +364,70 @@ describe('the time it is', () => {
     at.wake()
     expect(ran).toEqual(['a'])
   })
+
+  it('exposes monotonic() independent of wall jumps, excluding suspended spans without float dips, and continuous across close()', () => {
+    const { at, controller, clock } = made()
+    expect(clock.monotonic()).toBe(0)
+    at.mono = 25
+    at.wall += 3_600_000
+    expect(clock.monotonic()).toBe(25)
+    at.wall -= 7_200_000
+    expect(clock.monotonic()).toBe(25)
+
+    // Schedule across two suspend/resume cycles: elapsed monotonic() matches the 100 ms wait exactly.
+    const start = clock.monotonic()
+    let firedAt = -1
+    clock.after(100, () => { firedAt = clock.monotonic() })
+
+    at.mono = 65 // +40 active
+    expect(clock.monotonic()).toBe(65)
+    controller.suspend()
+    at.mono = 10_065 // +10_000 suspended (excluded)
+    expect(clock.monotonic()).toBe(65)
+    controller.resume()
+    expect(clock.monotonic()).toBe(65)
+
+    at.mono = 10_095 // +30 active (total 95)
+    expect(clock.monotonic()).toBe(95)
+    controller.suspend()
+    at.mono = 60_095 // +50_000 suspended (excluded)
+    expect(clock.monotonic()).toBe(95)
+    controller.resume()
+    expect(clock.monotonic()).toBe(95)
+
+    // Remaining 30 ms of the 100 ms wait fires at active monotonic 125 (start + 100).
+    at.wake()
+    expect(firedAt).toBe(start + 100)
+    expect(clock.monotonic()).toBe(125)
+
+    // Floating-point continuity across a large suspend span: 0.3 must not dip to 0.29999999999999716 on resume.
+    const fractional = made()
+    fractional.at.mono = 0.3
+    expect(fractional.clock.monotonic()).toBe(0.3)
+    fractional.controller.suspend()
+    fractional.at.mono = 100.3
+    expect(fractional.clock.monotonic()).toBe(0.3)
+    fractional.controller.resume()
+    expect(fractional.clock.monotonic()).toBe(0.3)
+    fractional.at.mono = 100.8
+    expect(fractional.clock.monotonic()).toBe(0.8)
+    fractional.controller.close()
+    // Closing while NOT suspended preserves monotonic() cleanly.
+    expect(fractional.clock.monotonic()).toBe(0.8)
+    fractional.at.mono = 101.8
+    expect(fractional.clock.monotonic()).toBe(1.8)
+
+    // Closing while suspended folds the suspended span cleanly with no jump and keeps advancing afterward.
+    const closedSuspended = made()
+    closedSuspended.at.mono = 15
+    closedSuspended.controller.suspend()
+    closedSuspended.at.mono = 5_015
+    expect(closedSuspended.clock.monotonic()).toBe(15)
+    closedSuspended.controller.close()
+    expect(closedSuspended.clock.monotonic()).toBe(15)
+    closedSuspended.at.mono = 5_040
+    expect(closedSuspended.clock.monotonic()).toBe(40)
+  })
 })
 
 describe('suspending the count', () => {
@@ -488,7 +552,7 @@ describe('closing and controller separation', () => {
     suspend()
     resume()
     expect(Object.isFrozen(consumer)).toBe(true)
-    expect(Object.keys(consumer).sort()).toEqual(['after', 'now', 'sleep'])
+    expect(Object.keys(consumer).sort()).toEqual(['after', 'monotonic', 'now', 'sleep'])
     expect('close' in consumer).toBe(false)
     expect('suspend' in consumer).toBe(false)
     expect('resume' in consumer).toBe(false)
@@ -497,10 +561,12 @@ describe('closing and controller separation', () => {
     // A minimal consumer Clock fake requires no lifecycle methods.
     const fake: Clock = {
       now: () => 0,
+      monotonic: () => 0,
       after: () => () => {},
       sleep: async () => {},
     }
     expect(fake.now()).toBe(0)
+    expect(fake.monotonic()).toBe(0)
     // A ClockController cannot be passed where a Clock is expected.
     // @ts-expect-error ClockController is not a Clock; pass controller.clock instead.
     const leaked: Clock = host
@@ -539,9 +605,11 @@ describe('on the real time and timers', () => {
       clock.after(10, () => { ran.push('first') })
       clock.after(30, () => { ran.push('never') })()
       const before = clock.now()
+      const beforeMono = clock.monotonic()
       await clock.sleep(80)
       expect(ran).toEqual(['at once', 'after 1', 'first', 'second'])
       expect(clock.now()).toBeGreaterThanOrEqual(before)
+      expect(clock.monotonic() - beforeMono).toBeGreaterThanOrEqual(80)
       expect(Math.abs(clock.now() - Date.now())).toBeLessThan(5_000)
     } finally {
       controller.close()

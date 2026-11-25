@@ -4,9 +4,9 @@
 
 JavaScript treats `setTimeout` and `Date.now()` as globals, which makes asynchronous code hard to coordinate, shut
 down cleanly, and test deterministically. `@apackdev/clock` gives the host one controllable clock (`ClockController`)
-and hands subsystems a three-method `Clock` (`now`, `after`, `sleep`)—with zero dependencies and the same shape in
-production and deterministic tests. The surface is intentionally small; additions require a real caller that cannot be
-served without them.
+and hands subsystems a four-method `Clock` (`now`, `monotonic`, `after`, `sleep`)—with zero dependencies and the same
+shape in production and deterministic tests. The surface is intentionally small; additions require a real caller that
+cannot be served without them.
 
 ```ts
 import { ClockController, type Clock } from '@apackdev/clock'
@@ -63,9 +63,9 @@ await done
 testClock.close()
 ```
 
-For concurrency interleaving proofs, `Clock` also has the same shape that [`@apackdev/link`](https://github.com/spankyed/apack-link) accepts (`after`) and that
+For concurrency interleaving proofs, `Clock`'s scheduling methods also match what [`@apackdev/link`](https://github.com/spankyed/apack-link) accepts (`after`) and what
 [`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) provides on a schedule (`now`, `after`, `sleep`),
-so code written against `Clock` runs unchanged under deterministic schedules (`await run(schedule.clock)`).
+so code using those methods runs unchanged under deterministic schedules (`await run(schedule.clock)`).
 
 ## API
 
@@ -78,14 +78,15 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 |---|---|
 | `clock.after(ms, run)` | Runs `run` once when `ms` have passed, unless what it returns is called first |
 | `clock.sleep(ms, options?)` | Resolves when `ms` have passed; accepts `{ signal?: AbortSignal }` |
-| `clock.now()` | The time of day in milliseconds since 1970, never earlier than what this clock last said. Note: `now()` is wall time (`Date.now()`), not monotonic time, so `now() + ms` is **not** when `after(ms)` fires; do not subtract `now()` readings to measure elapsed durations (wall time can jump forward, or pause until caught up after a backward correction) |
+| `clock.monotonic()` | Monotonic time in milliseconds from an arbitrary origin, never decreasing and excluding suspended spans. Subtract two readings (`clock.monotonic() - start`) to measure elapsed durations on the same timeline as `after` / `sleep` |
+| `clock.now()` | The time of day in milliseconds since 1970, never earlier than what this clock last said. Note: `now()` is wall time (`Date.now()`), not monotonic time, so `now() + ms` is **not** when `after(ms)` fires; use `monotonic()` rather than subtracting `now()` readings to measure elapsed durations |
 
 ### What the host holds (`ClockController`)
 
 | | |
 |---|---|
 | `new ClockController(sources?)` | Creates a controller on the real sources, or on custom `ClockSources` |
-| `controller.clock` | Frozen `Clock` exposing only `now`, `after`, and `sleep` |
+| `controller.clock` | Frozen `Clock` exposing only `now`, `monotonic`, `after`, and `sleep` |
 | `controller.waiting()` | Count of entries currently waiting to run |
 | `controller.suspend()` / `resume()` | Suspends and resumes counting; time elapsed while suspended is not counted against what waits |
 | `controller.close()` | Calls off everything waiting, clears any timer, rejects pending sleeps, and refuses later asks |
@@ -96,7 +97,7 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 |---|---|
 | `new TestClock(options?)` | Wraps `ClockController` on virtual `ClockSources` (`{ wall?: number \| Date; maxSteps?: number }`) |
 | `testClock.clock` | Frozen `Clock` to pass to code under test |
-| `testClock.elapsed()` | Virtual monotonic time elapsed in milliseconds (starts at `0`, independent of `setWall()`) |
+| `testClock.elapsed()` | Total virtual monotonic time elapsed in milliseconds (starts at `0`, independent of `setWall()`; unlike `clock.monotonic()`, includes time advanced while suspended) |
 | `testClock.advance(ms)` | Advances both virtual monotonic and wall time by finite `ms >= 0` event-by-event (including fractional and multi-decade waits), flushing microtasks after each callback |
 | `testClock.next()` | Runs the next due callback (advancing virtual monotonic and wall time to its deadline and skipping cancelled turns transparently) and flushes microtasks; returns `false` when idle, suspended, or closed |
 | `testClock.drain()` | Runs all runnable callbacks in order (advancing virtual monotonic and wall time across each deadline, bounded by `maxSteps`), flushing microtasks after each |
@@ -130,7 +131,8 @@ relies on these four contracts:
 
 - **Nothing runs early.** Duration is measured on `monotonic`, and what is due is checked again on every wake; an early
   timer runs nothing, and sub-millisecond remainders round up so OS jitter never spins at `0 ms`.
-- **Setting the time of day moves nothing that waits.** `after` never reads `wall`.
+- **Setting the time of day moves nothing that waits.** `after` and `monotonic()` never read `wall`.
+- **`monotonic()` never goes back and excludes suspended spans.** Measuring `clock.monotonic() - start` matches `after()` and `sleep()` across `suspend()`/`resume()` and `close()`.
 - **What `now()` says never goes back.** If `wall` moves backward or reads non-finite, `now()` keeps its last reading
   until `wall` passes it.
 - **At most one underlying timer**, for what is due first, and none once nothing waits, while suspended, or once closed.
