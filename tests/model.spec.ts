@@ -13,7 +13,7 @@ const seeded = (seed: number) => {
   return { int: (below: number): number => Math.floor(next() * below), pick: <T>(from: readonly T[]): T => from[Math.floor(next() * from.length)]! }
 }
 
-type Thing = { readonly id: number; readonly waitMs: number; readonly scheduledMono: number; due: number; state: 'waits' | 'ran' | 'off'; off(): void }
+type Thing = { readonly id: number; readonly due: number; state: 'waits' | 'ran' | 'off'; off(): void }
 
 /** One run: `steps` things done, drawn from `seed`, and then everything left let run. Throws for the first thing that does not hold. */
 const run = (seed: number, steps: number): { ran: number; hops: number } => {
@@ -36,18 +36,14 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
   const first = (): Thing | undefined => waits().reduce<Thing | undefined>((best, thing) => (!best || thing.due < best.due ? thing : best), undefined)
 
   const ask = (ms: number): void => {
-    const waitMs = Math.max(0, ms)
     const thing: Thing = {
       id: things.length,
-      waitMs,
-      scheduledMono: clock.monotonic(),
-      due: (stopped ?? at.mono) + waitMs,
+      due: clock.monotonic() + Math.max(0, ms),
       state: 'waits',
       off: clock.after(ms, () => {
         holds(thing.state === 'waits', `${thing.id} ran, and it had ${thing.state === 'ran' ? 'run already' : 'been called off'}`)
         holds(stopped === undefined, `${thing.id} ran while suspended`)
-        holds(at.mono >= thing.due, `${thing.id} ran at ${at.mono}, before it was due at ${thing.due}`)
-        holds(clock.monotonic() - thing.scheduledMono >= thing.waitMs - 1e-6, `${thing.id} elapsed ${clock.monotonic() - thing.scheduledMono} < ${thing.waitMs}`)
+        holds(clock.monotonic() >= thing.due, `${thing.id} ran at ${clock.monotonic()}, before it was due at ${thing.due}`)
         holds(first() === thing, `${thing.id} ran ahead of ${first()?.id}, which was due first`)
         holds(++inTurn === 1, `${thing.id} ran in a turn something else had run in`)
         thing.state = 'ran'
@@ -81,18 +77,22 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     holds(controller.waiting() === live.length, `waiting() is ${controller.waiting()}, expected ${live.length}`)
     holds(at.timers.length <= 1, `${at.timers.length} timers are set`)
     for (const ms of at.set) holds(ms > 0 && ms <= MAX_TIMER_MS, `a timer was set for ${ms}`)
+    const mono = clock.monotonic()
+    const expectedMono = (stopped ?? at.mono) - suspendedTotal
+    holds(mono >= lastMono, `monotonic() went back from ${lastMono} to ${mono}`)
+    holds(Math.abs(mono - expectedMono) <= 1e-6, `monotonic() is ${mono}, expected ${expectedMono}`)
+    lastMono = mono
     const next = first()
     if (stopped !== undefined) {
       holds(at.timers.length === 0, 'a timer is armed while suspended')
     } else if (at.turns === 0) {
       // At rest: nothing due is left waiting, and the timer is for the first of what is not, or as far as one goes.
-      holds(!next || next.due > at.mono, `${next?.id} was due at ${next?.due} and is left waiting at ${at.mono}`)
+      holds(!next || next.due > mono, `${next?.id} was due at ${next?.due} and is left waiting at ${mono}`)
       holds(at.timers.length === (next ? 1 : 0), `${at.timers.length} timers are set with ${live.length} things waiting`)
       const timer = at.timers[0]
       if (timer && next) {
-        const expectedDelay = Math.min(Math.ceil(next.due - at.mono), MAX_TIMER_MS)
-        holds(timer.at >= next.due || (timer.ms === MAX_TIMER_MS && timer.at < next.due), `the timer is for ${timer.at}, and ${next.id} is due at ${next.due}`)
-        holds(timer.at <= Math.max(next.due, at.mono + expectedDelay) + 1, `the timer overshot ${next.due} at ${timer.at}`)
+        const expectedDelay = Math.min(Math.ceil(next.due - mono), MAX_TIMER_MS)
+        holds(timer.ms === expectedDelay, `the timer is for ${timer.ms}, expected ${expectedDelay}`)
       }
     } else {
       holds(at.timers.length === 0, 'a timer is set while something due waits for its turn')
@@ -102,11 +102,6 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     holds(said >= lastSaid, `the time went back from ${lastSaid} to ${said}`)
     holds(said === highest, `the time is said to be ${said}, and the latest the time of day has been is ${highest}`)
     lastSaid = said
-    const mono = clock.monotonic()
-    const expectedMono = (stopped ?? at.mono) - suspendedTotal
-    holds(mono >= lastMono, `monotonic() went back from ${lastMono} to ${mono}`)
-    holds(Math.abs(mono - expectedMono) <= 1e-6, `monotonic() is ${mono}, expected ${expectedMono}`)
-    lastMono = mono
   }
 
   for (let step = 0; step < steps; step++) {
@@ -136,9 +131,7 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     } else {
       turn('resumed', () => {
         at.mono += random.pick([0, 1, 30_000, 3_600_000])
-        const span = at.mono - stopped!
-        for (const thing of waits()) thing.due += span
-        suspendedTotal += span
+        suspendedTotal += at.mono - stopped!
         stopped = undefined
         controller.resume()
       })
@@ -175,9 +168,7 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
   for (;;) {
     if (stopped !== undefined) {
       turn('resumed', () => {
-        const span = at.mono - stopped!
-        for (const thing of waits()) thing.due += span
-        suspendedTotal += span
+        suspendedTotal += at.mono - stopped!
         stopped = undefined
         controller.resume()
       })
