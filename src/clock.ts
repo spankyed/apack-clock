@@ -70,13 +70,57 @@ interface Entry {
   /** Tie-breaker among entries due at the same moment: lower was asked first. */
   readonly seq: number
   readonly run: () => void
-  /** Slot in the heap of what waits, or -1 once popped, called off, or closed. */
+  /** Slot in the heap of what waits while present. */
   index: number
 }
 
 const before = (a: Entry, b: Entry): boolean =>
   // Stryker disable next-line EqualityOperator: every entry has a unique seq, so < and <= are equivalent.
   a.due < b.due || (a.due === b.due && a.seq < b.seq)
+
+const assertFinite = (ms: number): void => {
+  if (!Number.isFinite(ms)) throw new RangeError(`A clock expects a finite wait in milliseconds, and was given ${String(ms)}`)
+}
+
+const place = (heap: Entry[], index: number, entry: Entry): void => {
+  heap[index] = entry
+  entry.index = index
+}
+
+const siftUp = (heap: Entry[], index: number): void => {
+  const entry = heap[index]!
+  while (index > 0) {
+    const parent = (index - 1) >> 1
+    if (!before(entry, heap[parent]!)) break
+    place(heap, index, heap[parent]!)
+    index = parent
+  }
+  place(heap, index, entry)
+}
+
+const siftDown = (heap: Entry[], index: number): void => {
+  const entry = heap[index]!
+  const length = heap.length
+  while (true) {
+    const left = index * 2 + 1
+    if (left >= length) break
+    const right = left + 1
+    const smallest = right < length && before(heap[right]!, heap[left]!) ? right : left
+    if (!before(heap[smallest]!, entry)) break
+    place(heap, index, heap[smallest]!)
+    index = smallest
+  }
+  place(heap, index, entry)
+}
+
+const removeAt = (heap: Entry[], index: number): void => {
+  const last = heap.pop()!
+  if (index < heap.length) {
+    place(heap, index, last)
+    if (index > 0 && before(last, heap[(index - 1) >> 1]!)) siftUp(heap, index)
+    else siftDown(heap, index)
+  }
+}
 
 /** Turns of the event loop, using `setImmediate` where present and a reused `MessageChannel` otherwise. */
 const makeTurns = (): { readonly turn: ClockSources['turn']; close(): void } => {
@@ -182,53 +226,11 @@ export class ClockController {
     /** Count of due entries actually dispatched to user callbacks. */
     let dispatched = 0
 
-    const place = (index: number, entry: Entry): void => {
-      heap[index] = entry
-      entry.index = index
-    }
-
-    const siftUp = (index: number): void => {
-      const entry = heap[index]!
-      while (index > 0) {
-        const parent = (index - 1) >> 1
-        if (!before(entry, heap[parent]!)) break
-        place(index, heap[parent]!)
-        index = parent
-      }
-      place(index, entry)
-    }
-
-    const siftDown = (index: number): void => {
-      const entry = heap[index]!
-      const length = heap.length
-      while (true) {
-        const left = index * 2 + 1
-        if (left >= length) break
-        const right = left + 1
-        const smallest = right < length && before(heap[right]!, heap[left]!) ? right : left
-        if (!before(heap[smallest]!, entry)) break
-        place(index, heap[smallest]!)
-        index = smallest
-      }
-      place(index, entry)
-    }
-
     const push = (due: number, run: () => void): Entry => {
       const entry: Entry = { due, seq: nextSeq++, run, index: heap.length }
       heap.push(entry)
-      siftUp(entry.index)
+      siftUp(heap, entry.index)
       return entry
-    }
-
-    const removeAt = (index: number): void => {
-      const removed = heap[index]!
-      const last = heap.pop()!
-      removed.index = -1
-      if (index < heap.length) {
-        place(index, last)
-        if (index > 0 && before(last, heap[(index - 1) >> 1]!)) siftUp(index)
-        else siftDown(index)
-      }
     }
 
     const disarm = (): void => {
@@ -264,15 +266,11 @@ export class ClockController {
       if (closed || suspended !== undefined) return
       const first = heap[0]
       if (!first || first.due > from.monotonic()) { arm(); return }
-      removeAt(0)
+      removeAt(heap, 0)
       dispatched++
       // Whatever it throws is handed on, and what still waits is seen to either way.
       running = true
       try { first.run() } finally { running = false; arm() }
-    }
-
-    const assertFinite = (ms: number): void => {
-      if (!Number.isFinite(ms)) throw new RangeError(`A clock expects a finite wait in milliseconds, and was given ${String(ms)}`)
     }
 
     const now: Clock['now'] = () => {
@@ -288,9 +286,9 @@ export class ClockController {
       const entry = push((suspended ?? from.monotonic()) + Math.max(0, ms), run)
       if (heap[0] !== wasHead) arm()
       return () => {
-        if (entry.index < 0) return
+        if (heap[entry.index] !== entry) return
         const wasHead = entry.index === 0
-        removeAt(entry.index)
+        removeAt(heap, entry.index)
         if (wasHead) arm()
       }
     }
@@ -327,7 +325,6 @@ export class ClockController {
       closed = true
       suspended = undefined
       disarm()
-      for (const entry of heap) entry.index = -1
       heap.length = 0
       ownedTurns?.close()
       for (const onClose of [...sleepers]) onClose()
@@ -346,7 +343,7 @@ export class ClockController {
       suspended = undefined
       for (const entry of heap) entry.due += span
       // Adding `span` can round two distinct `due` times to the same float, reversing their `seq` tie-break order.
-      for (let index = (heap.length >> 1) - 1; index >= 0; index--) siftDown(index)
+      for (let index = (heap.length >> 1) - 1; index >= 0; index--) siftDown(heap, index)
       arm()
     }
     this.close = close
