@@ -1,7 +1,7 @@
 # apack-clock
 
-A clock a program is handed in place of `setTimeout` and `Date.now()`. `README.md` holds the public contract; this
-file holds internal design details, vocabulary, and contributor rules.
+A clock a program is handed in place of `setTimeout`, `Date.now()`, and `performance.now()`. `README.md` holds the
+public contract; this file holds internal design details, vocabulary, and contributor rules.
 
 ## Layout
 
@@ -34,9 +34,9 @@ file holds internal design details, vocabulary, and contributor rules.
   multiple `after()` / cancel edits inside one callback settle into at most one underlying timer call.
 - **Stale wakeup guard (`armed.token`):** every armed underlying timer carries a fresh object token so a cancelled
   timer firing late cannot disarm or leak a newer timer.
-- **IEEE-754 `resume()` heap safety:** after shifting every waiting entry's `due` by the suspended `span`, bottom-up
-  Floyd heapify restores heap order in `O(n)` in case floating-point addition collapsed two distinct `due` values to
-  equal and flipped their `seq` tie-break order.
+- **Unified active monotonic timeline (`O(1)` `resume()`):** `after()`, `arm()`, `next()`, and `clock.monotonic()` all
+  use `activeBase + ((suspended ?? from.monotonic()) - resumeAnchor)` with immutable `readonly due`, so `resume()`
+  never walks or re-heapifies the heap and `clock.monotonic() >= entry.due` holds with zero float drift.
 
 ## Glossary (one voice)
 
@@ -44,7 +44,7 @@ Use these eight words consistently across `src/`, comments, specs, and docs:
 
 | Word | Meaning |
 |---|---|
-| `due` | The moment on `monotonic` when an entry may run |
+| `due` | The moment on `monotonic()` (active time, excluding suspended spans) when an entry may run |
 | `waits` | An entry still in the queue, not yet run or called off (`waiting()` counts them) |
 | `armed` | The single underlying timer currently set for what is due first |
 | `turn` | One turn of the event loop, in which at most one due entry runs |
@@ -59,8 +59,8 @@ Use these eight words consistently across `src/`, comments, specs, and docs:
   having woken. Sub-millisecond remainders round up (`Math.ceil`) so OS jitter never spins at `0 ms`.
 - **Nothing is guessed from a late timer.** It does not say whether the machine slept. Whoever is told says so through
   `suspend()` and `resume()`.
-- **How long is `monotonic`; the time it is, `wall`.** The two are never mixed: no reading of `monotonic` is handed
-  out, and nothing that waits is moved by `wall`.
+- **How long is `monotonic()`; the time it is, `wall`.** The two are never mixed: `wall` jumps never move `monotonic()`
+  or anything that waits, and `monotonic()` excludes suspended spans just as `after()` and `sleep()` do.
 - **Everything it reads or is woken by is a `ClockSources` member**, so specs choose it. Nothing in `src/` reaches for
   a timer or the time except as the default of one.
 - **No dependencies at run time.** It runs in Node, browsers, and Web Workers from one source, with
