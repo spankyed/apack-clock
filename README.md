@@ -63,9 +63,9 @@ await done
 testClock.close()
 ```
 
-For concurrency interleaving proofs, `Clock`'s scheduling methods also match what [`@apackdev/link`](https://github.com/spankyed/apack-link) accepts (`after`) and what
-[`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) provides on a schedule (`now`, `after`, `sleep`),
-so code using those methods runs unchanged under deterministic schedules (`await run(schedule.clock)`).
+For concurrency interleaving proofs, `Clock` also has the same shape that [`@apackdev/link`](https://github.com/spankyed/apack-link) accepts (`after`) and that
+[`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) provides on a schedule (`now`, `monotonic`, `after`, `sleep`),
+so code written against `Clock` runs unchanged under deterministic schedules (`await run(schedule.clock)`).
 
 ## API
 
