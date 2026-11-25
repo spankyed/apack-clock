@@ -240,9 +240,8 @@ export class ClockController {
     let running = false
     /** Reading of `monotonic` when counting suspended, while suspended. */
     let suspended: number | undefined
-    /** Active monotonic time accumulated before the most recent `resume()` (or `close()` while suspended). */
+    // Two anchors instead of one `suspendedTotal` offset: `raw - offset` can round below the prior reading after a large suspend.
     let activeBase = 0
-    /** Raw `from.monotonic()` reading at the most recent `resume()` (or `close()` while suspended). */
     let resumeAnchor = 0
     let closed = false
     /** Latest finite reading of `wall` that `now` has said. */

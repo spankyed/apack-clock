@@ -80,6 +80,7 @@ const run = (seed: number, steps: number): { ran: number; hops: number } => {
     const mono = clock.monotonic()
     const expectedMono = (stopped ?? at.mono) - suspendedTotal
     holds(mono >= lastMono, `monotonic() went back from ${lastMono} to ${mono}`)
+    // Tolerance is for this oracle's `raw - suspendedTotal` rounding, not slack in the clock.
     holds(Math.abs(mono - expectedMono) <= 1e-6, `monotonic() is ${mono}, expected ${expectedMono}`)
     lastMono = mono
     const next = first()
