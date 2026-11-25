@@ -109,7 +109,7 @@ Notes on `TestClock` semantics:
 
 ### Errors
 
-- **Non-finite `ms` (`NaN`, `±Infinity`):** `after` throws `RangeError`; `sleep` rejects with `RangeError`.
+- **Non-finite `ms` (`NaN`, `±Infinity`) or overflowing deadline (`monotonic + ms` overflows to `Infinity`):** `after` throws `RangeError`; `sleep` rejects with `RangeError`.
 - **Aborted `signal`:** `sleep` cancels its wait and rejects with `signal.reason`.
 - **Closed clock:** `after` throws and `sleep` rejects with `ClockClosedError`. Match it by name
   (`error instanceof Error && error.name === 'ClockClosedError'`) rather than `instanceof`, so cross-realm or duplicate
