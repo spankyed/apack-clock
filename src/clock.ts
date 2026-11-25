@@ -91,8 +91,9 @@ const siftUp = (heap: Entry[], index: number): void => {
   const entry = heap[index]!
   while (index > 0) {
     const parent = (index - 1) >> 1
-    if (!before(entry, heap[parent]!)) break
-    place(heap, index, heap[parent]!)
+    const parentEntry = heap[parent]!
+    if (!before(entry, parentEntry)) break
+    place(heap, index, parentEntry)
     index = parent
   }
   place(heap, index, entry)
@@ -101,14 +102,21 @@ const siftUp = (heap: Entry[], index: number): void => {
 const siftDown = (heap: Entry[], index: number): void => {
   const entry = heap[index]!
   const length = heap.length
-  while (true) {
-    const left = index * 2 + 1
-    if (left >= length) break
-    const right = left + 1
-    const smallest = right < length && before(heap[right]!, heap[left]!) ? right : left
-    if (!before(heap[smallest]!, entry)) break
-    place(heap, index, heap[smallest]!)
-    index = smallest
+  const half = length >> 1
+  while (index < half) {
+    let child = (index << 1) + 1
+    let best = heap[child]!
+    const right = child + 1
+    if (right < length) {
+      const rightEntry = heap[right]!
+      if (before(rightEntry, best)) {
+        child = right
+        best = rightEntry
+      }
+    }
+    if (!before(best, entry)) break
+    place(heap, index, best)
+    index = child
   }
   place(heap, index, entry)
 }
