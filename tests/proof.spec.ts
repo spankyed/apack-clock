@@ -48,6 +48,9 @@ const replay = (actions: readonly Action[]): ReplayState => {
   const { clock } = controller
   const things: Thing[] = []
   let stopped: number | undefined
+  let activeBase = 0
+  let resumeAnchor = 0
+  let lastMono = Number.NEGATIVE_INFINITY
   let closed = false
   let inTurn = 0
 
@@ -97,6 +100,11 @@ const replay = (actions: readonly Action[]): ReplayState => {
     const live = waits()
     holds(controller.waiting() === live.length, `waiting() ${controller.waiting()} !== ${live.length}`)
     holds(at.timers.length <= 1, `timers.length = ${at.timers.length}`)
+    const mono = clock.monotonic()
+    const expectedMono = activeBase + ((stopped ?? at.mono) - resumeAnchor)
+    holds(mono >= lastMono, `monotonic() went backward from ${lastMono} to ${mono}`)
+    holds(mono === expectedMono, `monotonic() ${mono} !== expected ${expectedMono}`)
+    lastMono = mono
     const next = first()
     if (closed) {
       holds(live.length === 0, 'closed clock has live items')
@@ -134,6 +142,8 @@ const replay = (actions: readonly Action[]): ReplayState => {
         at.mono += action.span
         const span = at.mono - stopped!
         for (const w of waits()) w.due += span
+        activeBase += stopped! - resumeAnchor
+        resumeAnchor = at.mono
         stopped = undefined
         controller.resume()
       })
@@ -145,9 +155,13 @@ const replay = (actions: readonly Action[]): ReplayState => {
       step(() => { at.turn() })
     } else {
       step(() => {
+        if (stopped !== undefined) {
+          activeBase += stopped - resumeAnchor
+          resumeAnchor = at.mono
+          stopped = undefined
+        }
         controller.close()
         closed = true
-        stopped = undefined
         for (const w of waits()) w.state = 'off'
       })
       let threwClosed = false
@@ -187,6 +201,8 @@ const replay = (actions: readonly Action[]): ReplayState => {
         step(() => {
           const span = at.mono - stopped!
           for (const w of waits()) w.due += span
+          activeBase += stopped! - resumeAnchor
+          resumeAnchor = at.mono
           stopped = undefined
           controller.resume()
         })

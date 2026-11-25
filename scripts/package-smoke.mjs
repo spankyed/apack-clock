@@ -47,9 +47,10 @@ import {
 } from '@apackdev/clock'
 import { TestClock, type TestClockOptions } from '@apackdev/clock/testing'
 
-const minimal: Clock = { now: () => 0, after: () => () => {}, sleep: async () => {} }
+const minimal: Clock = { now: () => 0, monotonic: () => 0, after: () => () => {}, sleep: async () => {} }
 const controller = new ClockController()
 const handoff: Clock = controller.clock
+const monoMs: number = handoff.monotonic()
 // @ts-expect-error ClockController must not be assignable to Clock.
 const leaked: Clock = controller
 // @ts-expect-error Consumer Clock must not expose host close().
@@ -63,14 +64,17 @@ const tc = new TestClock(tcOpts)
 tc.setWall(new Date('2026-01-02T00:00:00.000Z'))
 tc.setWall(1000)
 const testHandoff: Clock = tc.clock
+const testMonoMs: number = testHandoff.monotonic()
 const elapsedMs: number = tc.elapsed()
 // @ts-expect-error TestClock must not be assignable to Clock.
 const leakedTest: Clock = tc
 void minimal
+void monoMs
 void leaked
 void opts
 void partial
 void testHandoff
+void testMonoMs
 void elapsedMs
 void leakedTest
 void ClockClosedError

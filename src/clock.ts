@@ -46,8 +46,15 @@ export interface Clock {
    * back or reads non-finite, it keeps what it last said until `wall` passes that.
    *
    * Note: `now()` is wall time (`Date.now()`), not monotonic time; `now() + ms` is not when `after(ms)` fires.
+   * Use `monotonic()` to measure elapsed durations.
    */
   now(): number
+  /**
+   * Monotonic time in milliseconds from an arbitrary origin, never decreasing and excluding suspended spans.
+   * Subtract two readings (`clock.monotonic() - start`) to measure elapsed duration on the same timeline as `after()`
+   * and `sleep()`, unaffected by wall-clock jumps.
+   */
+  monotonic(): number
   /**
    * Runs `run` once when `ms` have passed on `monotonic`, unless what it returns is called first. Never before it is
    * due, and never inline: on a turn of its own, alone. Of two due at the same moment, the one asked first runs first.
@@ -191,7 +198,7 @@ export const clockInternals = new WeakMap<ClockController, ClockInternal>()
  * hand `controller.clock` to consumers so host lifecycle controls cannot leak by mistake.
  */
 export class ClockController {
-  /** Frozen consumer `Clock` exposing only `now`, `after`, and `sleep`. */
+  /** Frozen consumer `Clock` exposing only `now`, `monotonic`, `after`, and `sleep`. */
   readonly clock: Clock
   /** How many entries currently wait to run. */
   readonly waiting: () => number
@@ -226,6 +233,10 @@ export class ClockController {
     let running = false
     /** Reading of `monotonic` when counting suspended, while suspended. */
     let suspended: number | undefined
+    /** Active monotonic time accumulated before the most recent `resume()` (or `close()` while suspended). */
+    let activeBase = 0
+    /** Raw `from.monotonic()` reading at the most recent `resume()` (or `close()` while suspended). */
+    let resumeAnchor = 0
     let closed = false
     /** Latest finite reading of `wall` that `now` has said. */
     let said = Number.NEGATIVE_INFINITY
@@ -287,6 +298,14 @@ export class ClockController {
       return said
     }
 
+    const monotonic: Clock['monotonic'] = () => activeBase + ((suspended ?? from.monotonic()) - resumeAnchor)
+
+    const finishSuspend = (at: number): void => {
+      activeBase += suspended! - resumeAnchor
+      resumeAnchor = at
+      suspended = undefined
+    }
+
     const after: Clock['after'] = (ms, run) => {
       assertFinite(ms)
       if (closed) throw new ClockClosedError()
@@ -334,15 +353,15 @@ export class ClockController {
     })
 
     const close = (): void => {
+      if (suspended !== undefined) finishSuspend(from.monotonic())
       closed = true
-      suspended = undefined
       disarm()
       heap.length = 0
       ownedTurns?.close()
       for (const onClose of [...sleepers]) onClose()
     }
 
-    this.clock = Object.freeze({ now, after, sleep })
+    this.clock = Object.freeze({ now, monotonic, after, sleep })
     this.waiting = () => heap.length
     this.suspend = () => {
       if (closed || suspended !== undefined) return
@@ -351,8 +370,9 @@ export class ClockController {
     }
     this.resume = () => {
       if (suspended === undefined) return
-      const span = from.monotonic() - suspended
-      suspended = undefined
+      const at = from.monotonic()
+      const span = at - suspended
+      finishSuspend(at)
       for (const entry of heap) {
         const shifted = entry.due + span
         entry.due = Number.isFinite(shifted) ? shifted : Number.MAX_VALUE

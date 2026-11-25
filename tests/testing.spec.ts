@@ -217,18 +217,21 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     const testClock = new TestClock({ wall: 10_000 })
     const { clock } = testClock
     expect(clock.now()).toBe(10_000)
+    expect(clock.monotonic()).toBe(0)
     expect(testClock.elapsed()).toBe(0)
 
-    // Backward or non-finite wall jump never moves clock.now() backward or affects elapsed().
+    // Backward or non-finite wall jump never moves clock.now() backward or affects elapsed() / clock.monotonic().
     testClock.setWall(5_000)
     expect(clock.now()).toBe(10_000)
     testClock.setWall(Number.NaN)
     expect(clock.now()).toBe(10_000)
     await testClock.advance(25)
     expect(testClock.elapsed()).toBe(25)
+    expect(clock.monotonic()).toBe(25)
     expect(clock.now()).toBe(10_000)
     testClock.setWall(12_000)
     expect(clock.now()).toBe(12_000)
+    expect(clock.monotonic()).toBe(25)
 
     // Date values work in both constructor wall option and setWall() (including backward and invalid Date).
     const start = new Date('2026-01-01T00:00:00.000Z')
@@ -250,18 +253,22 @@ describe('TestClock (@apackdev/clock/testing)', () => {
 
     // Suspend while a 0-ms turn is queued: nothing runs while suspended, next() returns false, resume() fires it.
     const ran: string[] = []
+    const monoAtSchedule = clock.monotonic()
     clock.after(0, () => { ran.push('zero') })
-    clock.after(20, () => { ran.push('twenty') })
+    clock.after(20, () => { ran.push(`twenty@${clock.monotonic() - monoAtSchedule}`) })
     testClock.suspend()
     expect(await testClock.next()).toBe(false)
     await testClock.advance(100)
     expect(ran).toEqual([])
     expect(testClock.elapsed()).toBe(125)
+    expect(clock.monotonic()).toBe(25)
     testClock.resume()
+    expect(clock.monotonic()).toBe(25)
     await testClock.advance(0)
     expect(ran).toEqual(['zero'])
     await testClock.advance(20)
-    expect(ran).toEqual(['zero', 'twenty'])
+    expect(ran).toEqual(['zero', 'twenty@20'])
+    expect(clock.monotonic()).toBe(45)
 
     // AbortSignal cancels sleep cleanly.
     const abort = new AbortController()
