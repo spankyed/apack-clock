@@ -181,6 +181,28 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(advRan).toEqual([long])
     expect(byAdvance.waiting()).toBe(0)
     byAdvance.close()
+
+    // Extreme magnitudes where `mono + MAX_TIMER_MS === mono` (ULP > MAX_TIMER_MS) jump directly in O(1) without stalling.
+    const extreme = new TestClock({ maxSteps: 1 })
+    await extreme.advance(1e26)
+    let extremeAt = 0
+    extreme.clock.after(1e26, () => { extremeAt = extreme.elapsed() })
+    expect(await extreme.next()).toBe(true)
+    expect(extremeAt).toBe(2e26)
+    expect(extreme.waiting()).toBe(0)
+    extreme.close()
+
+    // A deadline that overflowed `mono + ms` to Infinity rejects next()/drain() cleanly without corrupting elapsed(),
+    // while finite partial advances that do not reach Infinity still succeed.
+    const overflowed = new TestClock()
+    await overflowed.advance(Number.MAX_VALUE)
+    overflowed.clock.after(Number.MAX_VALUE, () => {})
+    await overflowed.advance(10)
+    expect(overflowed.elapsed()).toBe(Number.MAX_VALUE)
+    await expect(overflowed.next()).rejects.toThrow(/non-finite deadline/)
+    await expect(overflowed.drain()).rejects.toThrow(/non-finite deadline/)
+    expect(overflowed.elapsed()).toBe(Number.MAX_VALUE)
+    overflowed.close()
   })
 
   it('preserves ClockController wall clamping, elapsed() isolation, suspend/resume, AbortSignal, and close semantics', async () => {
@@ -260,6 +282,16 @@ describe('TestClock (@apackdev/clock/testing)', () => {
       expect(() => new TestClock({ maxSteps: bad })).toThrow(RangeError)
     }
     expect(() => new TestClock({ maxSteps: 0 })).toThrow(/given 0/)
+
+    // A cancelled 0-ms turn before a real timer does not count against maxSteps: 1.
+    const staleBeforeReal = new TestClock({ maxSteps: 1 })
+    let ranReal = 0
+    const cancelStale = staleBeforeReal.clock.after(0, () => { ranReal++ })
+    staleBeforeReal.clock.after(5, () => { ranReal++ })
+    cancelStale()
+    await staleBeforeReal.advance(10)
+    expect(ranReal).toBe(1)
+    staleBeforeReal.close()
 
     // maxSteps === 1 succeeds when a microtask cancels the queued second 0-ms turn (leaving a stale pendingTurn with waiting() === 0).
     const staleAfterOne = new TestClock({ maxSteps: 1 })
