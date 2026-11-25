@@ -3,12 +3,12 @@
 // Wraps the real `ClockController` through `ClockSources` rather than reimplementing a second clock, so tests
 // exercise 100% of production semantics (monotonic clamping, `MAX_TIMER_MS` hops, `AbortSignal`, `ClockClosedError`,
 // one-callback-per-turn isolation, and `suspend`/`resume`) with zero drift and O(1) driver state.
-import { ClockController, type Clock } from './index.ts'
+import { ClockController, clockInternals, type Clock } from './clock.ts'
 
 export interface TestClockOptions {
   /** Initial wall-clock reading in milliseconds since 1970 (default `0`). */
   readonly wall?: number
-  /** Maximum turns or timer hops per `advance()` or `drain()` call before throwing `RangeError` (default `10_000`). */
+  /** Maximum dispatched callbacks per `advance()` or `drain()` call before throwing `RangeError` (default `10_000`). */
   readonly maxSteps?: number
 }
 
@@ -23,6 +23,8 @@ const DEFAULT_MAX_STEPS = 10_000
 export class TestClock {
   /** Frozen consumer `Clock` from the underlying `ClockController`. */
   readonly clock: Clock
+  /** Virtual monotonic time elapsed since this `TestClock` was created, in milliseconds (starts at `0`). */
+  readonly elapsed: () => number
   /** Count of entries currently waiting to run. */
   readonly waiting: () => number
   /** Suspends counting: elapsed virtual time until `resume()` is not counted against waiting entries. */
@@ -32,19 +34,20 @@ export class TestClock {
   /** Closes the underlying clock and releases the driver's microtask barrier channel. */
   readonly close: () => void
   /**
-   * Advances virtual time by finite non-negative `ms`, jumping event-by-event across pending turns and timer hops
-   * and flushing microtasks after every step. Throws `RangeError` if `ms` is invalid or `maxSteps` is exceeded.
+   * Advances virtual time by finite non-negative `ms`, jumping event-by-event across due callbacks (including
+   * sub-millisecond and multi-hop waits) and flushing microtasks after every callback.
+   * Throws `RangeError` if `ms` is invalid, `elapsed() + ms` overflows, or `maxSteps` is exceeded.
+   * If a callback throws, advancement stops at that callback's timestamp and the error rejects this promise.
    */
   readonly advance: (ms: number) => Promise<void>
   /**
-   * Runs the next pending turn, or jumps directly to the next armed timer wakeup and runs it, flushing microtasks.
-   * Returns `true` if a step ran, or `false` when nothing is queued or armed.
-   * Waits longer than `MAX_TIMER_MS` wake in `MAX_TIMER_MS` hops; use `advance(ms)` or `drain()` to cross them in one call.
+   * Runs the next due user callback (crossing any cancelled turns or internal `MAX_TIMER_MS` hops transparently)
+   * and flushes microtasks. Returns `true` if a callback ran, or `false` when idle, suspended, or closed.
    */
   readonly next: () => Promise<boolean>
   /**
-   * Runs `next()` repeatedly until nothing remains queued or armed, flushing microtasks after each step.
-   * Throws `RangeError` if `maxSteps` is exceeded.
+   * Runs all due callbacks in order until nothing runnable remains, flushing microtasks after each callback.
+   * Throws `RangeError` if dispatched callbacks exceed `maxSteps`.
    */
   readonly drain: () => Promise<void>
   /** Sets the virtual wall-clock reading (forward, backward, or non-finite) without moving monotonic time. */
@@ -104,6 +107,7 @@ export class TestClock {
         pendingTurn = run
       },
     })
+    const internal = clockInternals.get(controller)!
 
     const stepOne = (limit: number): boolean => {
       if (pendingTurn) {
@@ -112,17 +116,26 @@ export class TestClock {
         run()
         return true
       }
-      if (armed && armed.due <= limit) {
-        const { due, run } = armed
-        armed = undefined
-        const delta = due - mono
-        mono = due
-        wall += delta
-        run()
-        return true
+      if (armed) {
+        // `ClockController` rounds sub-ms remainders up with `Math.ceil`; use exact `nextDue()` when earlier so
+        // fractional waits fire at their exact deadline while > MAX_TIMER_MS waits still step through each hop.
+        const wakeAt = Math.min(armed.due, internal.nextDue())
+        if (wakeAt <= limit) {
+          const { run } = armed
+          armed = undefined
+          const delta = wakeAt - mono
+          mono = wakeAt
+          wall += delta
+          run()
+          return true
+        }
       }
       return false
     }
+
+    const hasWorkUpTo = (limit: number): boolean =>
+      (pendingTurn !== undefined && controller.waiting() > 0) ||
+      (armed !== undefined && Math.min(armed.due, internal.nextDue()) <= limit)
 
     const guard = async <T>(work: () => Promise<T>): Promise<T> => {
       if (stepping) throw new Error('TestClock is already stepping; await the previous advance, next, or drain call first')
@@ -135,17 +148,25 @@ export class TestClock {
       }
     }
 
-    this.clock = controller.clock
-    this.waiting = controller.waiting
-    this.suspend = () => {
-      controller.suspend()
-      // Drain any pre-suspend turn now: `ClockController` already marked itself suspended, so it only clears `turning`.
-      if (pendingTurn) {
-        const run = pendingTurn
-        pendingTurn = undefined
-        run()
+    const runUntil = async (limit: number, label: string): Promise<void> => {
+      await flush()
+      let steps = 0
+      while (true) {
+        const before = internal.dispatched()
+        if (!stepOne(limit)) break
+        if (internal.dispatched() > before) {
+          await flush()
+          if (++steps >= maxSteps && hasWorkUpTo(limit)) {
+            throw new RangeError(`TestClock exceeded maxSteps (${maxSteps}) during ${label}`)
+          }
+        }
       }
     }
+
+    this.clock = controller.clock
+    this.elapsed = () => mono
+    this.waiting = controller.waiting
+    this.suspend = controller.suspend
     this.resume = controller.resume
     this.close = () => {
       closed = true
@@ -158,34 +179,26 @@ export class TestClock {
         throw new RangeError(`TestClock.advance expects a finite non-negative duration, and was given ${String(ms)}`)
       }
       const target = mono + ms
-      await flush()
-      let steps = 0
-      while (stepOne(target)) {
-        await flush()
-        if (++steps >= maxSteps && (pendingTurn !== undefined || (armed !== undefined && armed.due <= target))) {
-          throw new RangeError(`TestClock exceeded maxSteps (${maxSteps}) during advance(${ms})`)
-        }
+      if (!Number.isFinite(target)) {
+        throw new RangeError(`TestClock.advance(${String(ms)}) would overflow virtual monotonic time`)
       }
+      await runUntil(target, `advance(${ms})`)
       const remaining = target - mono
       mono = target
       wall += remaining
     })
     this.next = () => guard(async () => {
       await flush()
-      if (!stepOne(Number.POSITIVE_INFINITY)) return false
-      await flush()
-      return true
-    })
-    this.drain = () => guard(async () => {
-      await flush()
-      let steps = 0
+      const before = internal.dispatched()
       while (stepOne(Number.POSITIVE_INFINITY)) {
-        await flush()
-        if (++steps >= maxSteps && (pendingTurn !== undefined || armed !== undefined)) {
-          throw new RangeError(`TestClock exceeded maxSteps (${maxSteps}) during drain()`)
+        if (internal.dispatched() > before) {
+          await flush()
+          return true
         }
       }
+      return false
     })
+    this.drain = () => guard(() => runUntil(Number.POSITIVE_INFINITY, 'drain()'))
     this.setWall = (ms) => { wall = ms }
   }
 }
