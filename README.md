@@ -49,15 +49,23 @@ powerMonitor.on('resume', controller.resume)
 
 ## In a test
 
-`Clock` has the same shape that `@apackdev/link` accepts (`after`) and that
-[`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) provides on a schedule (`now`, `after`, `sleep`).
-Any code written against `Clock` runs unchanged under deterministic schedules:
+For manual deterministic stepping (backoff, debounce, heartbeats, TTL, or wall-clock jumps), import `TestClock` from
+`@apackdev/clock/testing`. It wraps the real `ClockController` via `ClockSources` rather than reimplementing a second
+clock, flushes microtasks after every step, and guards against runaway loops:
 
 ```ts
-// In production: await run(controller.clock)
-// In a test:
-await run(schedule.clock)
+import { TestClock } from '@apackdev/clock/testing'
+
+const testClock = new TestClock({ wall: 1_000 })
+const done = run(testClock.clock)
+await testClock.advance(40)
+await done
+testClock.close()
 ```
+
+For concurrency interleaving proofs, `Clock` also has the same shape that `@apackdev/link` accepts (`after`) and that
+[`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) provides on a schedule (`now`, `after`, `sleep`),
+so code written against `Clock` runs unchanged under deterministic schedules (`await run(schedule.clock)`).
 
 ## API
 
@@ -81,6 +89,18 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 | `controller.waiting()` | Count of entries currently waiting to run |
 | `controller.suspend()` / `resume()` | Suspends and resumes counting; time elapsed while suspended is not counted against what waits |
 | `controller.close()` | Calls off everything waiting, clears any timer, rejects pending sleeps, and refuses later asks |
+
+### Testing driver (`@apackdev/clock/testing`)
+
+| | |
+|---|---|
+| `new TestClock(options?)` | Wraps `ClockController` on virtual `ClockSources` (`{ wall?: number; maxSteps?: number }`) |
+| `testClock.clock` | Frozen `Clock` to pass to code under test |
+| `testClock.advance(ms)` | Advances virtual time by finite `ms >= 0` event-by-event, flushing microtasks after each step |
+| `testClock.next()` | Runs the next queued turn or timer wakeup and flushes microtasks; returns `false` when idle |
+| `testClock.drain()` | Runs `next()` until nothing remains queued or armed (bounded by `maxSteps`) |
+| `testClock.setWall(ms)` | Jumps virtual wall time (forward, backward, or non-finite) without moving monotonic time |
+| `testClock.waiting()` / `suspend()` / `resume()` / `close()` | Host lifecycle controls forwarded to the underlying `ClockController` |
 
 ### Errors
 
@@ -127,7 +147,7 @@ relies on these four contracts:
   safety at every state and verifying that every non-closed state drains to completion.
 - **Randomized traces with checked sources:** [tests/model.spec.ts](tests/model.spec.ts) runs 400 seeded traces while
   [tests/contracts.spec.ts](tests/contracts.spec.ts) checks all four source contracts on every call.
-- **Every mutant is caught:** `npm run mutants` mutates `src/index.ts` and fails CI if a single mutant survives.
+- **Every mutant is caught:** `npm run mutants` mutates `src/` and fails CI if a single mutant survives.
 
 ## What it does not do
 

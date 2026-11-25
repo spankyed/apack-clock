@@ -23,8 +23,17 @@ try {
   run(['install', '--no-audit', '--no-fund', '--no-package-lock', tarball], consumer)
   fs.writeFileSync(path.join(consumer, 'entries.mjs'), `
 import * as clock from '@apackdev/clock'
+import * as testing from '@apackdev/clock/testing'
 for (const name of ['ClockController', 'ClockClosedError']) if (typeof clock[name] !== 'function') throw new Error('@apackdev/clock has no ' + name)
 if (clock.MAX_TIMER_MS !== 0x7fffffff) throw new Error('@apackdev/clock has no MAX_TIMER_MS')
+if (typeof testing.TestClock !== 'function') throw new Error('@apackdev/clock/testing has no TestClock')
+const tc = new testing.TestClock()
+let woke = false
+const done = tc.clock.sleep(10).then(() => { woke = true })
+await tc.advance(10)
+await done
+tc.close()
+if (!woke) throw new Error('@apackdev/clock/testing TestClock failed to wake sleep')
 `)
   execFileSync(process.execPath, ['entries.mjs'], { cwd: consumer, stdio: 'inherit' })
   fs.writeFileSync(path.join(consumer, 'consumer.ts'), `
@@ -36,6 +45,7 @@ import {
   type ClockSleepOptions,
   type ClockSources,
 } from '@apackdev/clock'
+import { TestClock, type TestClockOptions } from '@apackdev/clock/testing'
 
 const minimal: Clock = { now: () => 0, after: () => () => {}, sleep: async () => {} }
 const controller = new ClockController()
@@ -48,10 +58,17 @@ void handoff.close
 void handoff.suspend
 const opts: ClockSleepOptions = {}
 const partial: Partial<ClockSources> = {}
+const tcOpts: TestClockOptions = { wall: 1000, maxSteps: 100 }
+const tc = new TestClock(tcOpts)
+const testHandoff: Clock = tc.clock
+// @ts-expect-error TestClock must not be assignable to Clock.
+const leakedTest: Clock = tc
 void minimal
 void leaked
 void opts
 void partial
+void testHandoff
+void leakedTest
 void ClockClosedError
 void MAX_TIMER_MS
 `)
