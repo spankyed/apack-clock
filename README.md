@@ -63,7 +63,7 @@ await done
 testClock.close()
 ```
 
-For concurrency interleaving proofs, `Clock` also has the same shape that `@apackdev/link` accepts (`after`) and that
+For concurrency interleaving proofs, `Clock` also has the same shape that [`@apackdev/link`](https://github.com/spankyed/apack-link) accepts (`after`) and that
 [`@apackdev/orderings`](https://github.com/spankyed/apack-orderings) provides on a schedule (`now`, `after`, `sleep`),
 so code written against `Clock` runs unchanged under deterministic schedules (`await run(schedule.clock)`).
 
@@ -78,7 +78,7 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 |---|---|
 | `clock.after(ms, run)` | Runs `run` once when `ms` have passed, unless what it returns is called first |
 | `clock.sleep(ms, options?)` | Resolves when `ms` have passed; accepts `{ signal?: AbortSignal }` |
-| `clock.now()` | The time of day in milliseconds since 1970, never earlier than what this clock last said. Note: `now()` is wall time (`Date.now()`), not monotonic time, so `now() + ms` is **not** when `after(ms)` fires |
+| `clock.now()` | The time of day in milliseconds since 1970, never earlier than what this clock last said. Note: `now()` is wall time (`Date.now()`), not monotonic time, so `now() + ms` is **not** when `after(ms)` fires; do not subtract `now()` readings to measure elapsed durations (wall time can jump forward, or pause until caught up after a backward correction) |
 
 ### What the host holds (`ClockController`)
 
@@ -97,15 +97,16 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 | `new TestClock(options?)` | Wraps `ClockController` on virtual `ClockSources` (`{ wall?: number \| Date; maxSteps?: number }`) |
 | `testClock.clock` | Frozen `Clock` to pass to code under test |
 | `testClock.elapsed()` | Virtual monotonic time elapsed in milliseconds (starts at `0`, independent of `setWall()`) |
-| `testClock.advance(ms)` | Advances virtual time by finite `ms >= 0` event-by-event (including sub-ms and multi-hop waits), flushing microtasks after each callback |
-| `testClock.next()` | Runs the next due callback (crossing cancelled turns and internal `MAX_TIMER_MS` hops transparently) and flushes microtasks; returns `false` when idle, suspended, or closed |
-| `testClock.drain()` | Runs all runnable callbacks in order (bounded by `maxSteps`), flushing microtasks after each |
+| `testClock.advance(ms)` | Advances both virtual monotonic and wall time by finite `ms >= 0` event-by-event (including fractional and multi-decade waits), flushing microtasks after each callback |
+| `testClock.next()` | Runs the next due callback (advancing virtual monotonic and wall time to its deadline and skipping cancelled turns transparently) and flushes microtasks; returns `false` when idle, suspended, or closed |
+| `testClock.drain()` | Runs all runnable callbacks in order (advancing virtual monotonic and wall time across each deadline, bounded by `maxSteps`), flushing microtasks after each |
 | `testClock.setWall(wall)` | Jumps virtual wall time (`number` or `Date`, forward, backward, or non-finite) without moving monotonic time |
 | `testClock.waiting()` / `suspend()` / `resume()` / `close()` | Host lifecycle controls forwarded to the underlying `ClockController` |
 
 Notes on `TestClock` semantics:
 - **Scope of isolation:** `TestClock` controls code wired to `Clock`, not the wider JS environment — unrelated I/O or raw global `setTimeout` callbacks may still run while awaiting the `MessageChannel` microtask barrier.
 - **Exact deadlines:** `TestClock` jumps directly to each entry's exact deadline (including fractional waits and multi-decade durations in `O(1)`), whereas real runtimes wake at OS timer resolution (`>= Math.ceil(left)`).
+- **Serial stepping & throws:** `advance`, `next`, and `drain` must be awaited one at a time (concurrent calls reject). If a callback throws, stepping stops at that callback's timestamp and the error rejects the step promise.
 
 ### Errors
 
@@ -143,7 +144,8 @@ relies on these four contracts:
 
 ## How it is checked
 
-- **Cross-runtime specs:** unit specs ([tests/clock.spec.ts](tests/clock.spec.ts)) and dedicated Web Worker specs
+- **Cross-runtime specs:** unit specs ([tests/clock.spec.ts](tests/clock.spec.ts)), testing driver specs
+  ([tests/testing.spec.ts](tests/testing.spec.ts)), and dedicated Web Worker specs
   ([tests/worker.spec.ts](tests/worker.spec.ts)) run in Node on Linux, macOS, and Windows, and in Chromium, Firefox,
   and WebKit.
 - **Bounded exhaustive exploration:** [tests/proof.spec.ts](tests/proof.spec.ts) drives `ClockController` directly

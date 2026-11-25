@@ -1,8 +1,8 @@
 // Deterministic virtual-time driver for tests (`@apackdev/clock/testing`).
 //
 // Wraps the real `ClockController` through `ClockSources` rather than reimplementing a second clock, so tests
-// exercise 100% of production semantics (monotonic clamping, `MAX_TIMER_MS` hops, `AbortSignal`, `ClockClosedError`,
-// one-callback-per-turn isolation, and `suspend`/`resume`) with zero drift and O(1) driver state.
+// exercise production semantics (monotonic clamping, `AbortSignal`, `ClockClosedError`, one-callback-per-turn
+// isolation, and `suspend`/`resume`) with zero drift and O(1) direct deadline jumps.
 import { ClockController, clockInternals, type Clock } from './clock.ts'
 
 export interface TestClockOptions {
@@ -36,15 +36,16 @@ export class TestClock {
   /** Closes the underlying clock and releases the driver's microtask barrier channel. */
   readonly close: () => void
   /**
-   * Advances virtual time by finite non-negative `ms`, jumping event-by-event across due callbacks (including
-   * sub-millisecond and multi-hop waits) and flushing microtasks after every callback.
+   * Advances both virtual monotonic and wall time by finite non-negative `ms`, jumping event-by-event across due
+   * callbacks (including fractional and multi-decade waits) and flushing microtasks after every callback.
    * Throws `RangeError` if `ms` is invalid, `elapsed() + ms` overflows, or `maxSteps` is exceeded.
    * If a callback throws, advancement stops at that callback's timestamp and the error rejects this promise.
    */
   readonly advance: (ms: number) => Promise<void>
   /**
-   * Runs the next due user callback (crossing any cancelled turns or internal `MAX_TIMER_MS` hops transparently)
-   * and flushes microtasks. Returns `true` if a callback ran, or `false` when idle, suspended, or closed.
+   * Runs the next due user callback (advancing virtual monotonic and wall time to its deadline and skipping any
+   * cancelled turns transparently) and flushes microtasks. Returns `true` if a callback ran, or `false` when idle,
+   * suspended, or closed.
    */
   readonly next: () => Promise<boolean>
   /**
