@@ -338,6 +338,40 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(staleAfterOne.waiting()).toBe(0)
     staleAfterOne.close()
 
+    // maxSteps === 1 succeeds when a microtask cancels the queued second 0-ms turn while a later timer sits past target.
+    const staleWithFuture = new TestClock({ maxSteps: 1 })
+    let ranFuture = 0
+    let cancelSecondTurn = () => {}
+    staleWithFuture.clock.after(0, () => {
+      ranFuture++
+      staleWithFuture.clock.after(10, () => { ranFuture++ })
+      void Promise.resolve().then(() => { cancelSecondTurn() })
+    })
+    cancelSecondTurn = staleWithFuture.clock.after(0, () => { ranFuture++ })
+    await staleWithFuture.advance(0)
+    expect(ranFuture).toBe(1)
+    expect(staleWithFuture.waiting()).toBe(1)
+    await staleWithFuture.advance(10)
+    expect(ranFuture).toBe(2)
+    staleWithFuture.close()
+
+    // maxSteps === 1 succeeds when a microtask suspends the clock before the queued second 0-ms turn can run, and resumes enforcing maxSteps after resume().
+    const suspendedAfterOne = new TestClock({ maxSteps: 1 })
+    const suspendedRan: string[] = []
+    suspendedAfterOne.clock.after(0, () => {
+      suspendedRan.push('first')
+      queueMicrotask(() => { suspendedAfterOne.suspend() })
+    })
+    suspendedAfterOne.clock.after(0, () => { suspendedRan.push('second') })
+    await suspendedAfterOne.drain()
+    expect(suspendedRan).toEqual(['first'])
+    expect(suspendedAfterOne.waiting()).toBe(1)
+    suspendedAfterOne.clock.after(0, () => { suspendedRan.push('third') })
+    suspendedAfterOne.resume()
+    await expect(suspendedAfterOne.drain()).rejects.toThrow(/maxSteps \(1\) during drain\(\)/)
+    expect(suspendedRan).toEqual(['first', 'second'])
+    suspendedAfterOne.close()
+
     // Exact boundary: 2 steps allowed when maxSteps === 2, even if a later timer sits past target.
     const exact = new TestClock({ maxSteps: 2 })
     const ran: number[] = []
