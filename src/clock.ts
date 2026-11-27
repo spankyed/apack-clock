@@ -134,8 +134,6 @@ const siftDown = (heap: Entry[], index: number): void => {
 }
 
 const removeAt = (heap: Entry[], index: number): void => {
-  // Stryker disable next-line all: GC release.
-  heap[index]!.run = undefined
   const last = heap.pop()!
   if (index < heap.length) {
     place(heap, index, last)
@@ -304,6 +302,7 @@ export class ClockController {
       const first = heap[0]
       if (!first || first.due > monotonic()) { arm(); return }
       const run = first.run!
+      first.run = undefined
       removeAt(heap, 0)
       dispatched++
       // Whatever it throws is handed on, and what still waits is seen to either way.
@@ -331,6 +330,7 @@ export class ClockController {
       return () => {
         if (heap[entry.index] !== entry) return
         const wasHead = entry.index === 0
+        entry.run = undefined
         removeAt(heap, entry.index)
         if (wasHead) arm()
       }
@@ -369,7 +369,6 @@ export class ClockController {
       if (suspended !== undefined) finishSuspend(suspended, from.monotonic())
       closed = true
       disarm()
-      // Stryker disable next-line all: GC release.
       for (const entry of heap) entry.run = undefined
       heap.length = 0
       ownedTurns?.close()
