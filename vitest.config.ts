@@ -9,7 +9,11 @@ export const shared = {
   testTimeout: 60_000,
 } as const
 
-/** The specs in Node: what runs on three systems, and all a mutant is run against (`vitest.mutants.ts`). */
+/**
+ * The specs in Node: what runs on three systems, and all a mutant is run against (`vitest.mutants.ts`).
+ * `--expose-gc` stays in `package.json` (`--pool threads`) and `stryker.config.mjs` (`testRunnerNodeArgs`) rather than
+ * `execArgv` here because `execArgv` fails under Stryker's forced `threads` pool.
+ */
 export const node = { extends: true as const, test: { name: 'node', include: specs } }
 
 export default defineConfig({

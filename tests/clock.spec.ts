@@ -266,7 +266,8 @@ describe('calling off', () => {
     expect(ran).toEqual(['b'])
   })
 
-  it.skipIf(typeof globalThis.gc !== 'function')('releases callbacks on dispatch, cancel, and close even while cancel handles stay reachable', async () => {
+  it.skipIf(typeof process === 'undefined' || !process.versions?.node)('releases callbacks on dispatch, cancel, and close even while cancel handles stay reachable', async () => {
+    if (typeof globalThis.gc !== 'function') throw new Error('run with --expose-gc (npm test)')
     const { at, controller, clock } = made()
     const schedule = (ms: number): { readonly cancel: () => void; readonly ref: WeakRef<object> } => {
       const held = { payload: new Uint8Array(1024) }
