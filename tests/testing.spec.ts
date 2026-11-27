@@ -262,6 +262,18 @@ describe('TestClock (@apackdev/clock/testing)', () => {
     expect(dated.clock.now()).toBe(later.getTime())
     dated.close()
 
+    // Non-finite initial wall is rejected eagerly by the constructor, while setWall(NaN) before first now() throws until finite.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, new Date('not a date')]) {
+      expect(() => new TestClock({ wall: bad })).toThrow(RangeError)
+    }
+    expect(() => new TestClock({ wall: new Date('not a date') })).toThrow(/wall.*given NaN/)
+    const unsetWall = new TestClock()
+    unsetWall.setWall(Number.NaN)
+    expect(() => unsetWall.clock.now()).toThrow(RangeError)
+    unsetWall.setWall(42)
+    expect(unsetWall.clock.now()).toBe(42)
+    unsetWall.close()
+
     // Suspend when no turn is pending, then resume cleanly.
     testClock.suspend()
     expect(await testClock.next()).toBe(false)
