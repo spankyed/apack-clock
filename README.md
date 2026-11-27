@@ -113,7 +113,7 @@ Notes on `TestClock` semantics:
 
 - **Non-finite `ms` (`NaN`, `±Infinity`) or overflowing deadline (`monotonic + ms` overflows to `Infinity`):** `after` throws `RangeError`; `sleep` rejects with `RangeError`.
 - **Initially non-finite `wall()`:** `now()` throws `RangeError` if `wall()` has never returned a finite reading yet. Once a finite reading has been seen, later non-finite or backward readings keep what `now()` last said.
-- **Aborted `signal`:** `sleep` cancels its wait and rejects with `signal.reason`.
+- **Aborted `signal`:** `sleep` cancels its wait and rejects with `signal.reason`. (If an earlier listener on `signal` suppresses the abort event via `stopImmediatePropagation()`, `sleep` rejects with `signal.reason` when it would have resolved instead of resolving.)
 - **Closed clock:** `after` throws and `sleep` rejects with `ClockClosedError`. Match it by name
   (`error instanceof Error && error.name === 'ClockClosedError'`) rather than `instanceof`, so cross-realm or duplicate
   package loads still match.

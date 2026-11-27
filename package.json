@@ -34,7 +34,7 @@
     "build": "node node_modules/typescript/bin/tsc -p tsconfig.build.json",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "typecheck:floor": "node node_modules/typescript-5.7/bin/tsc --noEmit -p tsconfig.floor.json",
-    "test": "vitest run --project node",
+    "test": "node --expose-gc node_modules/vitest/vitest.mjs run --project node --pool threads",
     "test:browser": "vitest run --project browser",
     "test:watch": "vitest",
     "prepack": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && npm run build",

@@ -192,14 +192,16 @@ describe('what runs, and when', () => {
     expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
 
-    // Even if an earlier abort listener calls stopImmediatePropagation(), sleep never resolves after abort.
+    // Even if an earlier abort listener calls stopImmediatePropagation(), sleep rejects at the deadline instead of resolving.
     const suppressed = new AbortController()
     const suppressedReason = new Error('suppressed abort')
     suppressed.signal.addEventListener('abort', (event) => { event.stopImmediatePropagation() })
     const suppressedSleep = clock.sleep(50, { signal: suppressed.signal })
     suppressed.abort(suppressedReason)
+    expect(controller.waiting()).toBe(1)
     at.wake()
     await expect(suppressedSleep).rejects.toBe(suppressedReason)
+    expect(controller.waiting()).toBe(0)
   })
 })
 
@@ -262,6 +264,32 @@ describe('calling off', () => {
     off()
     at.settle()
     expect(ran).toEqual(['b'])
+  })
+
+  it.skipIf(typeof globalThis.gc !== 'function')('releases callbacks on dispatch, cancel, and close even while cancel handles stay reachable', async () => {
+    const { at, controller, clock } = made()
+    const schedule = (ms: number): { readonly cancel: () => void; readonly ref: WeakRef<object> } => {
+      const held = { payload: new Uint8Array(1024) }
+      const ref = new WeakRef(held)
+      const cancel = clock.after(ms, () => { void held.payload.byteLength })
+      return { cancel, ref }
+    }
+    const dispatched = schedule(10)
+    const cancelled = schedule(20)
+    const closed = schedule(30)
+    // Keep all three cancel handles strongly reachable across GC.
+    const retainedCancels = [dispatched.cancel, cancelled.cancel, closed.cancel]
+    at.wake()
+    cancelled.cancel()
+    controller.close()
+
+    const refs = [dispatched.ref, cancelled.ref, closed.ref]
+    for (let attempt = 0; attempt < 20 && refs.some((ref) => ref.deref() !== undefined); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      globalThis.gc!()
+    }
+    expect(refs.map((ref) => ref.deref())).toEqual([undefined, undefined, undefined])
+    expect(retainedCancels).toHaveLength(3)
   })
 })
 

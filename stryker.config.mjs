@@ -5,6 +5,7 @@
 //   npm run mutants
 export default {
   testRunner: 'vitest',
+  testRunnerNodeArgs: ['--expose-gc'],
   // The specs in Node: a browser is not opened for each mutant.
   vitest: { configFile: 'vitest.mutants.ts' },
   mutate: ['src/**/*.ts'],
