@@ -112,6 +112,7 @@ Notes on `TestClock` semantics:
 ### Errors
 
 - **Non-finite `ms` (`NaN`, `±Infinity`) or overflowing deadline (`monotonic + ms` overflows to `Infinity`):** `after` throws `RangeError`; `sleep` rejects with `RangeError`.
+- **Initially non-finite `wall()`:** `now()` throws `RangeError` if `wall()` has never returned a finite reading yet. Once a finite reading has been seen, later non-finite or backward readings keep what `now()` last said.
 - **Aborted `signal`:** `sleep` cancels its wait and rejects with `signal.reason`.
 - **Closed clock:** `after` throws and `sleep` rejects with `ClockClosedError`. Match it by name
   (`error instanceof Error && error.name === 'ClockClosedError'`) rather than `instanceof`, so cross-realm or duplicate
@@ -122,15 +123,15 @@ Notes on `TestClock` semantics:
 `new ClockController(sources)` accepts any subset of four sources (`monotonic`, `wall`, `timer`, `turn`). Soundness
 relies on these four contracts:
 
-- **`monotonic()`** returns a finite number in milliseconds that never decreases (default: `performance.now()`).
-- **`wall()`** returns milliseconds since 1970; it may jump, go back, or read non-finite (`now()` never follows it back; default: `Date.now()`).
+- **`monotonic()`** returns a finite number in milliseconds whose differences stay finite and never decrease (default: `performance.now()`).
+- **`wall()`** returns milliseconds since 1970; it may jump, go back, or read non-finite (`now()` throws `RangeError` until a finite reading has been seen, and never follows it back after; default: `Date.now()`).
 - **`timer(ms, run)`** never invokes `run` inline and returns a cancel function; it may wake early, late, or stale. In return, the clock only passes finite `ms` in `(0, MAX_TIMER_MS]` (`0x7fffffff`) and keeps at most one timer set (default: `setTimeout` / `clearTimeout`).
 - **`turn(run)`** never invokes `run` inline and runs callbacks in the order asked (default: `setImmediate`, or a reused `MessageChannel` in browsers and Web Workers).
 
 ## What holds
 
-- **Nothing runs early.** Duration is measured on `monotonic`, and what is due is checked again on every wake; an early
-  timer runs nothing, and sub-millisecond remainders round up so OS jitter never spins at `0 ms`.
+- **Nothing runs early (to IEEE-754 double precision).** Duration is measured on `monotonic`, and what is due is checked again on every wake; an early
+  timer runs nothing, and sub-millisecond remainders round up so OS jitter never spins at `0 ms`. (Standard float64 addition `monotonic() + ms` applies; positive delays smaller than half a ULP at the current monotonic timestamp round to `0`.)
 - **Setting the time of day moves nothing that waits.** `after` and `monotonic()` never read `wall`.
 - **`monotonic()` never goes back and excludes suspended spans.** Measuring `clock.monotonic() - start` matches `after()` and `sleep()` across `suspend()`/`resume()` and `close()`.
 - **What `now()` says never goes back.** If `wall` moves backward or reads non-finite, `now()` keeps its last reading
