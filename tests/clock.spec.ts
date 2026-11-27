@@ -202,6 +202,20 @@ describe('what runs, and when', () => {
     at.wake()
     await expect(suppressedSleep).rejects.toBe(suppressedReason)
     expect(controller.waiting()).toBe(0)
+
+    // A synthetic 'abort' event while signal.aborted is false does not cancel the sleep.
+    const synthetic = new AbortController()
+    let syntheticDone = false
+    const syntheticSleep = clock.sleep(50, { signal: synthetic.signal }).then(() => { syntheticDone = true })
+    synthetic.signal.dispatchEvent(new Event('abort'))
+    expect(synthetic.signal.aborted).toBe(false)
+    expect(controller.waiting()).toBe(1)
+    await Promise.resolve()
+    expect(syntheticDone).toBe(false)
+    at.wake()
+    await syntheticSleep
+    expect(syntheticDone).toBe(true)
+    expect(controller.waiting()).toBe(0)
   })
 })
 

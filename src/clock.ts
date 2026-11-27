@@ -197,6 +197,8 @@ export interface ClockInternal {
   readonly resumeAnchor: () => number
   /** Count of due user callbacks dispatched so far (never incremented by internal hops or cancelled/suspended wakes). */
   readonly dispatched: () => number
+  /** Whether counting is currently suspended. */
+  readonly suspended: () => boolean
 }
 
 /** Package-internal registry mapping each `ClockController` to its inspection hooks. */
@@ -347,6 +349,7 @@ export class ClockController {
         signal?.removeEventListener('abort', onAbort)
       }
       const onAbort = (): void => {
+        if (!signal!.aborted) return
         cleanup()
         cancel()
         reject(signal!.reason)
@@ -393,6 +396,7 @@ export class ClockController {
       activeBase: () => activeBase,
       resumeAnchor: () => resumeAnchor,
       dispatched: () => dispatched,
+      suspended: () => suspended !== undefined,
     })
   }
 }

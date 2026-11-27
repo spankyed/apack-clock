@@ -75,7 +75,6 @@ export class TestClock {
     let armed: (() => void) | undefined
     let pendingTurn: (() => void) | undefined
     let stepping = false
-    let suspended = false
     let closed = false
 
     let channel: InstanceType<typeof MessageChannel> | undefined
@@ -158,7 +157,7 @@ export class TestClock {
     }
 
     const hasWorkUpTo = (limit: number): boolean =>
-      !suspended && controller.waiting() > 0 && nextRawDue() <= limit
+      !internal.suspended() && controller.waiting() > 0 && nextRawDue() <= limit
 
     const guard = async <T>(work: () => Promise<T>): Promise<T> => {
       if (stepping) throw new Error('TestClock is already stepping; await the previous advance, next, or drain call first')
@@ -189,14 +188,8 @@ export class TestClock {
     this.clock = controller.clock
     this.elapsed = () => mono
     this.waiting = controller.waiting
-    this.suspend = () => {
-      suspended = true
-      controller.suspend()
-    }
-    this.resume = () => {
-      suspended = false
-      controller.resume()
-    }
+    this.suspend = controller.suspend
+    this.resume = controller.resume
     this.close = () => {
       closed = true
       controller.close()
