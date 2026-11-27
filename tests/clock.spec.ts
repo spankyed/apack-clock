@@ -191,6 +191,15 @@ describe('what runs, and when', () => {
     await expect(waiting).rejects.toBe(liveReason)
     expect(controller.waiting()).toBe(0)
     expect(at.timers).toEqual([])
+
+    // Even if an earlier abort listener calls stopImmediatePropagation(), sleep never resolves after abort.
+    const suppressed = new AbortController()
+    const suppressedReason = new Error('suppressed abort')
+    suppressed.signal.addEventListener('abort', (event) => { event.stopImmediatePropagation() })
+    const suppressedSleep = clock.sleep(50, { signal: suppressed.signal })
+    suppressed.abort(suppressedReason)
+    at.wake()
+    await expect(suppressedSleep).rejects.toBe(suppressedReason)
   })
 })
 
@@ -352,6 +361,22 @@ describe('the time it is', () => {
     expect(clock.now()).toBe(5_000)
     at.wall = 5_001
     expect(clock.now()).toBe(5_001)
+  })
+
+  it('throws RangeError from now() until wall() produces a finite reading, and accepts negative finite readings', () => {
+    const { at, clock } = made()
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      at.wall = bad
+      expect(() => clock.now()).toThrow(RangeError)
+    }
+    at.wall = Number.NaN
+    expect(() => clock.now()).toThrow(/given NaN/)
+    at.wall = -1_000
+    expect(clock.now()).toBe(-1_000)
+    at.wall = Number.NaN
+    expect(clock.now()).toBe(-1_000)
+    at.wall = -500
+    expect(clock.now()).toBe(-500)
   })
 
   it('moves nothing that waits when the time of day is set', () => {

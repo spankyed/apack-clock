@@ -11,9 +11,9 @@
 
 /** What a clock reads and is woken by. Each is the real one unless given. */
 export interface ClockSources {
-  /** Milliseconds on a clock that only goes forward, from any start: `performance.now()`. Must stay finite and never decrease. */
+  /** Milliseconds on a clock that only goes forward, from any start: `performance.now()`. Must stay finite with finite differences and never decrease. */
   monotonic(): number
-  /** The time of day, in milliseconds since 1970: `Date.now()`. May go back or read non-finite; `now` never follows it back. */
+  /** The time of day, in milliseconds since 1970: `Date.now()`. May go back or read non-finite; `now` throws `RangeError` until a finite reading has been seen, and never follows it back after. */
   wall(): number
   /**
    * Calls `run` once, about `ms` from now, unless what it returns is called first: `setTimeout`. Must not invoke `run`
@@ -45,7 +45,8 @@ export class ClockClosedError extends Error {
 export interface Clock {
   /**
    * The time of day, in milliseconds since 1970, and never earlier than what this clock last said: where `wall` goes
-   * back or reads non-finite, it keeps what it last said until `wall` passes that.
+   * back or reads non-finite, it keeps what it last said until `wall` passes that. Throws `RangeError` if `wall` has
+   * never returned a finite reading yet.
    *
    * Note: `now()` is wall time (`Date.now()`), not monotonic time; `now() + ms` is not when `after(ms)` fires.
    * Use `monotonic()` to measure elapsed durations.
@@ -59,9 +60,9 @@ export interface Clock {
   monotonic(): number
   /**
    * Runs `run` once when `ms` have passed on `monotonic()`, unless what it returns is called first. Never before it is
-   * due, and never inline: on a turn of its own, alone. Of two due at the same moment, the one asked first runs first.
-   * Less than nothing is nothing. Throws `RangeError` for a non-finite `ms` or overflowing deadline, and
-   * `ClockClosedError` once closed.
+   * due (to IEEE-754 double precision), and never inline: on a turn of its own, alone. Of two due at the same moment,
+   * the one asked first runs first. Less than nothing is nothing. Throws `RangeError` for a non-finite `ms` or
+   * overflowing deadline, and `ClockClosedError` once closed.
    */
   after(ms: number, run: () => void): () => void
   /**
@@ -79,7 +80,8 @@ interface Entry {
   readonly due: number
   /** Tie-breaker among entries due at the same moment: lower was asked first. */
   readonly seq: number
-  readonly run: () => void
+  /** Callback to run when due; cleared on dispatch, cancel, or close so retained cancel handles do not retain it. */
+  run: (() => void) | undefined
   /** Slot in the heap of what waits while present. */
   index: number
 }
@@ -132,6 +134,8 @@ const siftDown = (heap: Entry[], index: number): void => {
 }
 
 const removeAt = (heap: Entry[], index: number): void => {
+  // Stryker disable next-line all: GC release.
+  heap[index]!.run = undefined
   const last = heap.pop()!
   if (index < heap.length) {
     place(heap, index, last)
@@ -244,8 +248,8 @@ export class ClockController {
     let activeBase = 0
     let resumeAnchor = 0
     let closed = false
-    /** Latest finite reading of `wall` that `now` has said. */
-    let said = Number.NEGATIVE_INFINITY
+    /** Latest finite reading of `wall` that `now` has said, if any has been seen yet. */
+    let said: number | undefined
     /** Pending sleeps rejected with `ClockClosedError` if the clock closes first. */
     const sleepers = new Set<() => void>()
     /** Count of due entries actually dispatched to user callbacks. */
@@ -299,16 +303,18 @@ export class ClockController {
       if (closed || suspended !== undefined) return
       const first = heap[0]
       if (!first || first.due > monotonic()) { arm(); return }
+      const run = first.run!
       removeAt(heap, 0)
       dispatched++
       // Whatever it throws is handed on, and what still waits is seen to either way.
       running = true
-      try { first.run() } finally { running = false; arm() }
+      try { run() } finally { running = false; arm() }
     }
 
     const now: Clock['now'] = () => {
       const wall = from.wall()
-      if (Number.isFinite(wall)) said = Math.max(said, wall)
+      if (Number.isFinite(wall)) said = said === undefined ? wall : Math.max(said, wall)
+      if (said === undefined) throw new RangeError(`A clock expects a finite wall time, and was given ${String(wall)}`)
       return said
     }
 
@@ -352,6 +358,7 @@ export class ClockController {
 
       cancel = after(ms, () => {
         cleanup()
+        if (signal?.aborted) { reject(signal.reason); return }
         resolve()
       })
       sleepers.add(onClose)
@@ -362,6 +369,8 @@ export class ClockController {
       if (suspended !== undefined) finishSuspend(suspended, from.monotonic())
       closed = true
       disarm()
+      // Stryker disable next-line all: GC release.
+      for (const entry of heap) entry.run = undefined
       heap.length = 0
       ownedTurns?.close()
       for (const onClose of [...sleepers]) onClose()
