@@ -6,7 +6,7 @@
 import { ClockController, clockInternals, type Clock } from './clock.ts'
 
 export interface TestClockOptions {
-  /** Initial wall-clock reading in milliseconds since 1970, or a `Date` (default `0`). */
+  /** Initial finite wall-clock reading in milliseconds since 1970, or a valid `Date` (default `0`). */
   readonly wall?: number | Date
   /** Maximum dispatched callbacks per `advance()` or `drain()` call before throwing `RangeError` (default `10_000`). */
   readonly maxSteps?: number
@@ -72,6 +72,9 @@ export class TestClock {
 
     let mono = 0
     let wall = toWall(options.wall ?? 0)
+    if (!Number.isFinite(wall)) {
+      throw new RangeError(`TestClock expects wall to be finite, and was given ${String(wall)}`)
+    }
     let armed: (() => void) | undefined
     let pendingTurn: (() => void) | undefined
     let stepping = false

@@ -107,6 +107,7 @@ expected is a compile error, so host controls cannot leak to consumers by mistak
 Notes on `TestClock` semantics:
 - **Scope of isolation:** `TestClock` controls code wired to `Clock`, not the wider JS environment — unrelated I/O or raw global `setTimeout` callbacks may still run while awaiting the `MessageChannel` microtask barrier.
 - **Exact deadlines:** `TestClock` jumps directly to each entry's exact deadline (including fractional waits and multi-decade durations in `O(1)`), whereas real runtimes wake at OS timer resolution (`>= Math.ceil(left)`).
+- **Initial wall time:** `new TestClock({ wall })` rejects a non-finite `wall` (such as an invalid `Date`) with `RangeError`. Calling `setWall()` with a non-finite value before the first `clock.now()` causes `now()` to throw `RangeError` until a finite wall time is set.
 - **Serial stepping & throws:** `advance`, `next`, and `drain` must be awaited one at a time (concurrent calls reject). If a callback throws, stepping stops at that callback's timestamp and the error rejects the step promise.
 
 ### Errors
@@ -123,7 +124,7 @@ Notes on `TestClock` semantics:
 `new ClockController(sources)` accepts any subset of four sources (`monotonic`, `wall`, `timer`, `turn`). Soundness
 relies on these four contracts:
 
-- **`monotonic()`** returns a finite number in milliseconds whose differences stay finite and never decrease (default: `performance.now()`).
+- **`monotonic()`** returns a finite number in milliseconds that never decreases, with a finite difference between any two readings (default: `performance.now()`).
 - **`wall()`** returns milliseconds since 1970; it may jump, go back, or read non-finite (`now()` throws `RangeError` until a finite reading has been seen, and never follows it back after; default: `Date.now()`).
 - **`timer(ms, run)`** never invokes `run` inline and returns a cancel function; it may wake early, late, or stale. In return, the clock only passes finite `ms` in `(0, MAX_TIMER_MS]` (`0x7fffffff`) and keeps at most one timer set (default: `setTimeout` / `clearTimeout`).
 - **`turn(run)`** never invokes `run` inline and runs callbacks in the order asked (default: `setImmediate`, or a reused `MessageChannel` in browsers and Web Workers).
